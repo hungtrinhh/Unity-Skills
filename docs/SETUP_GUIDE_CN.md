@@ -96,6 +96,7 @@ references/                 # Unity 开发参考文档
 | Cursor | `.cursor/skills/` | `~/.cursor/skills/` |
 | OpenCode | `.opencode/skills/` | `~/.config/opencode/skills/` |
 | Kimi Code | `.kimi-code/skills/` | `~/.kimi-code/skills/`（或 `$KIMI_CODE_HOME/skills/`） |
+| Oh My Pi (OMP) | `.omp/skills/` 或 `.agents/skills/` | `~/.agents/skills/` 或 `~/.omp/skills/` |
 
 ### 支持的 AI 工具
 
@@ -109,6 +110,7 @@ references/                 # Unity 开发参考文档
 | **Cursor** | ✅ | 自动扫描 `.cursor/skills/` 和 `.agents/skills/`；支持 `/skill-name` 显式触发；可在 设置 → Rules 查看已加载技能 |
 | **OpenCode** | ✅ | 原生扫描工作区 `.opencode/skills/` 和全局 `~/.config/opencode/skills/` |
 | **Kimi Code** | ✅ | 原生扫描项目级 `.kimi-code/skills/` 和用户级 `~/.kimi-code/skills/`（跟随 `$KIMI_CODE_HOME`）；支持 `/skill:unity-skills` 显式触发；同时扫描 `.agents/skills/` |
+| **Oh My Pi (OMP)** | ✅ | 原生 Agent Skills 支持（`.agents/skills/` 或 `.omp/skills/`）+ `.omp/mcp.json` MCP 服务配置（`unity-cli` 与 `unityMCP`）；详见 [Oh My Pi 配置指南](OH_MY_PI_SETUP.md) |
 
 > ⚠️ **通用兼容性**：UnitySkills 遵循开放的 Skill 标准。**任何能读取 markdown 文件并发送 HTTP 请求的 AI 工具**都可以使用 UnitySkills — 不限于上述列表。只需将 `unity-skills~/` 目录内容复制到你的工具的 skill 或 prompt 位置，确保工具能访问 `http://localhost:8090` 即可。
 

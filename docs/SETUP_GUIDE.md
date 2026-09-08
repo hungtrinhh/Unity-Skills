@@ -96,6 +96,7 @@ If one-click installation is not available for your tool, manually copy the cont
 | Cursor | `.cursor/skills/` | `~/.cursor/skills/` |
 | OpenCode | `.opencode/skills/` | `~/.config/opencode/skills/` |
 | Kimi Code | `.kimi-code/skills/` | `~/.kimi-code/skills/` (or `$KIMI_CODE_HOME/skills/`) |
+| Oh My Pi (OMP) | `.omp/skills/` or `.agents/skills/` | `~/.agents/skills/` or `~/.omp/skills/` |
 
 ### Supported AI Tools
 
@@ -109,6 +110,7 @@ The following tools have been officially tested:
 | **Cursor** | ✅ | Auto-discovers `.cursor/skills/` and `.agents/skills/`; supports `/skill-name` explicit trigger; visible in Settings → Rules |
 | **OpenCode** | ✅ | Native `.opencode/skills/` workspace and `~/.config/opencode/skills/` global discovery |
 | **Kimi Code** | ✅ | Native `.kimi-code/skills/` project and `~/.kimi-code/skills/` user discovery (follows `$KIMI_CODE_HOME`); `/skill:unity-skills` explicit trigger; also scans `.agents/skills/` |
+| **Oh My Pi (OMP)** | ✅ | Open Agent Skills (`.agents/skills/` or `.omp/skills/`) + MCP support via `.omp/mcp.json` (`unity-cli` and `unityMCP`); see [Oh My Pi Setup Guide](OH_MY_PI_SETUP.md) |
 
 > ⚠️ **Universal Compatibility**: UnitySkills follows an open skill standard. **Any AI tool that can read markdown files and make HTTP requests** can use UnitySkills — not limited to the tools listed above. Simply copy the `unity-skills~/` directory contents to your tool's skill or prompt location and ensure the tool can reach `http://localhost:8090`.
 
