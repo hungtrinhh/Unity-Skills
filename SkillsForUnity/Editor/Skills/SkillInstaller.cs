@@ -8,7 +8,7 @@ using System.Text;
 namespace UnitySkills
 {
     /// <summary>
-    /// One-click skill installer for mainstream AI IDEs: Claude Code, Antigravity, Codex, Cursor, OpenCode, Kimi Code.
+    /// One-click skill installer for mainstream AI IDEs: Claude Code, Antigravity, Codex, Cursor, OpenCode, Kimi Code, Oh My Pi.
     /// </summary>
     public static class SkillInstaller
     {
@@ -42,6 +42,10 @@ namespace UnitySkills
         // The user-level root takes this value if the Editor inherits KIMI_CODE_HOME, otherwise ~/.kimi-code.
         public static string KimiCodeProjectPath => Path.Combine(Application.dataPath, "..", ".kimi-code", "skills", "unity-skills");
         public static string KimiCodeGlobalPath => Path.Combine(KimiCodeHome, "skills", "unity-skills");
+
+        // Oh My Pi (OMP) path
+        public static string OhMyPiProjectPath => Path.Combine(Application.dataPath, "..", ".omp", "skills", "unity-skills");
+        public static string OhMyPiGlobalPath => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".omp", "skills", "unity-skills");
 
         /// <summary>
         /// Resolves $KIMI_CODE_HOME (default ~/.kimi-code). Only visible when Unity was launched
@@ -80,6 +84,8 @@ namespace UnitySkills
         public static bool IsOpenCodeGlobalInstalled => Directory.Exists(OpenCodeGlobalPath) && File.Exists(Path.Combine(OpenCodeGlobalPath, "SKILL.md"));
         public static bool IsKimiCodeProjectInstalled => Directory.Exists(KimiCodeProjectPath) && File.Exists(Path.Combine(KimiCodeProjectPath, "SKILL.md"));
         public static bool IsKimiCodeGlobalInstalled => Directory.Exists(KimiCodeGlobalPath) && File.Exists(Path.Combine(KimiCodeGlobalPath, "SKILL.md"));
+        public static bool IsOhMyPiProjectInstalled => Directory.Exists(OhMyPiProjectPath) && File.Exists(Path.Combine(OhMyPiProjectPath, "SKILL.md"));
+        public static bool IsOhMyPiGlobalInstalled => Directory.Exists(OhMyPiGlobalPath) && File.Exists(Path.Combine(OhMyPiGlobalPath, "SKILL.md"));
 
         public static (bool success, string message) InstallClaude(bool global)
         {
@@ -237,6 +243,32 @@ namespace UnitySkills
             }
         }
 
+        public static (bool success, string message) InstallOhMyPi(bool global)
+        {
+            try
+            {
+                var targetPath = global ? OhMyPiGlobalPath : OhMyPiProjectPath;
+                return InstallSkill(targetPath, "Oh My Pi", "OhMyPi");
+            }
+            catch (Exception ex)
+            {
+                return (false, ex.Message);
+            }
+        }
+
+        public static (bool success, string message) UninstallOhMyPi(bool global)
+        {
+            try
+            {
+                var targetPath = global ? OhMyPiGlobalPath : OhMyPiProjectPath;
+                return UninstallSkill(targetPath, "Oh My Pi");
+            }
+            catch (Exception ex)
+            {
+                return (false, ex.Message);
+            }
+        }
+
         /// <summary>
         /// Runtime description of an install target (tool x scope). The panel and the auto-sync
         /// share this single detect/install entry point, avoiding two separate copies of the copy logic drifting apart.
@@ -250,7 +282,7 @@ namespace UnitySkills
         }
 
         /// <summary>
-        /// Enumerates all built-in install targets (6 tools x project/global scope).
+        /// Enumerates all built-in install targets (7 tools x project/global scope).
         /// Note that Codex and Antigravity's project-level paths are both .agents/skills (a shared directory per the open standard); callers that need to de-duplicate by path
         /// must handle that themselves.
         /// </summary>
@@ -268,6 +300,8 @@ namespace UnitySkills
             yield return MakeTarget("OpenCode (Global)", OpenCodeGlobalPath, () => IsOpenCodeGlobalInstalled, () => InstallOpenCode(true));
             yield return MakeTarget("Kimi Code (Project)", KimiCodeProjectPath, () => IsKimiCodeProjectInstalled, () => InstallKimiCode(false));
             yield return MakeTarget("Kimi Code (Global)", KimiCodeGlobalPath, () => IsKimiCodeGlobalInstalled, () => InstallKimiCode(true));
+            yield return MakeTarget("Oh My Pi (Project)", OhMyPiProjectPath, () => IsOhMyPiProjectInstalled, () => InstallOhMyPi(false));
+            yield return MakeTarget("Oh My Pi (Global)", OhMyPiGlobalPath, () => IsOhMyPiGlobalInstalled, () => InstallOhMyPi(true));
         }
 
         private static InstallTarget MakeTarget(string displayName, string path, Func<bool> isInstalled, Func<(bool, string)> install)

@@ -293,10 +293,10 @@ namespace UnitySkills.Tests.Core
         {
             var targets = SkillInstaller.EnumerateTargets().ToList();
 
-            Assert.That(targets.Count, Is.EqualTo(12));
+            Assert.That(targets.Count, Is.EqualTo(14));
             Assert.That(targets.All(target => target.IsInstalled != null && target.Install != null), Is.True);
             Assert.That(targets.All(target => !string.IsNullOrEmpty(target.Path)), Is.True);
-            foreach (var name in new[] { "Claude Code", "Codex", "Antigravity", "Cursor", "OpenCode", "Kimi Code" })
+            foreach (var name in new[] { "Claude Code", "Codex", "Antigravity", "Cursor", "OpenCode", "Kimi Code", "Oh My Pi" })
             {
                 Assert.That(targets.Any(target => target.DisplayName == name + " (Project)"), Is.True, name + " project target missing");
                 Assert.That(targets.Any(target => target.DisplayName == name + " (Global)"), Is.True, name + " global target missing");

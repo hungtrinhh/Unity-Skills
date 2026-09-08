@@ -8,7 +8,7 @@ namespace UnitySkills
 {
     /// <summary>
     /// AI Config Tab — one card per supported Agent (Claude Code / Codex /
-    /// Antigravity / Cursor / OpenCode / Kimi Code) plus a Custom Agent card.
+    /// Antigravity / Cursor / OpenCode / Kimi Code / Oh My Pi) plus a Custom Agent card.
     /// Cards are built dynamically so adding a new agent only requires one
     /// entry in _agentConfigs.
     /// </summary>
@@ -122,6 +122,15 @@ namespace UnitySkills
                     isGlobInstalled = () => SkillInstaller.IsKimiCodeGlobalInstalled,
                     installFunc = SkillInstaller.InstallKimiCode,
                     uninstallFunc = SkillInstaller.UninstallKimiCode
+                },
+                new AgentConfig
+                {
+                    id = "ohmypi", brandClass = "brand-ohmypi",
+                    nameDisplay = "Oh My Pi",
+                    isProjInstalled = () => SkillInstaller.IsOhMyPiProjectInstalled,
+                    isGlobInstalled = () => SkillInstaller.IsOhMyPiGlobalInstalled,
+                    installFunc = SkillInstaller.InstallOhMyPi,
+                    uninstallFunc = SkillInstaller.UninstallOhMyPi
                 }
             };
         }
