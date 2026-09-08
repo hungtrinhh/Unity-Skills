@@ -6,11 +6,10 @@ This guide describes how to configure and use **Oh My Pi (OMP)** with **Unity-Sk
 
 ## 1. Overview & Architecture
 
-Oh My Pi can interact with Unity via two complementary mechanisms:
-1. **Unity-Skills REST API (Port 8090)**: Fast, comprehensive direct REST integration driving Unity Editor automation via local HTTP requests. Unity-Skills is driven directly as an AI Skill (via `.omp/skills/unity-skills` or Open Agent Skills), not via an MCP server entry.
-2. **Model Context Protocol (MCP)**: Standardized MCP tools configured in `.omp/mcp.json` (`unity-cli` stdio server). (Optional: `unityMCP` HTTP server on port 8080 only if using the separate `MCPForUnity` package and its server is running).
-
----
+Oh My Pi can interact with Unity via:
+1. **Unity-Skills MCP Server (`unity-skills`)**: Dedicated FastMCP server bridging Oh My Pi to the embedded Unity-Skills REST service (port 8090-8100), exposing high-leverage tools (`execute_skill`, `dry_run_skill`, `batch_skills`, `search_skills`, `get_skill_schema`, `get_editor_health`, `diagnose_editor`).
+2. **Unity-Skills Direct REST API**: Direct HTTP requests against port 8090 or via Python scripts.
+3. **Unity CLI MCP Server (`unity-cli`)**: Standardized Unity CLI MCP interface for headless commands and project lifecycle.
 
 ## 2. Unity-Skills REST Server Workflow (Port 8090)
 
@@ -35,8 +34,17 @@ Create `.omp/mcp.json` in your repository root:
 
 ```json
 {
-  "$schema": "https://raw.githubusercontent.com/can1357/oh-my-pi/main/packages/coding-agent/src/config/mcp-schema.json",
   "mcpServers": {
+    "unity-skills": {
+      "type": "stdio",
+      "command": "uv",
+      "args": [
+        "--directory",
+        "D:/MCP/Unity-Skills/mcp",
+        "run",
+        "server.py"
+      ]
+    },
     "unity-cli": {
       "type": "stdio",
       "command": "unity",
@@ -48,19 +56,18 @@ Create `.omp/mcp.json` in your repository root:
     }
   }
 }
-```
-
 *(Note: Do not add `unityMCP` on `http://127.0.0.1:8080/mcp` unless you are running the separate `MCPForUnity` package and have started its server in Unity via `Window > MCP for Unity`. Unity-Skills uses port 8090 REST API directly as an AI Skill).*
 
 ### Server Details
 
+- **`unity-skills` (stdio via uv)**:
+  - Runs the dedicated MCP server in `mcp/server.py` using `uv`.
+  - Automatically connects to the Unity Editor instance running on ports `8090-8100`.
+  - Exposes complete Unity-Skills capabilities (execute, dry run, batch, intent search, schemas, diagnostics).
 - **`unity-cli` (stdio)**:
   - Runs the Unity command-line MCP interface (`unity mcp --project-path <path>`).
   - `${CWD}` dynamically expands to the current project directory.
   - Used for headless CLI commands, project management, and editor operations via stdio.
-- **`unityMCP` (http - optional)**:
-  - Connects to the separate Unity MCP (MCPForUnity) HTTP endpoint at `http://127.0.0.1:8080/mcp`.
-  - Requires manually opening `Window > MCP for Unity` and clicking "Start Server" in the Editor. If the server is not running, OMP startup will fail to connect.
 ---
 
 ## 4. Oh My Pi MCP Commands
