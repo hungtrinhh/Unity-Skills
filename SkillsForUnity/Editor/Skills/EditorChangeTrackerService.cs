@@ -224,6 +224,7 @@ namespace UnitySkills
 #endif
                             break;
 
+#if UNITY_2022_2_OR_NEWER
                         case ObjectChangeKind.ChangeChildrenOrder:
                             stream.GetChangeChildrenOrderEvent(i, out var orderArgs);
 #if UNITY_6000_4_OR_NEWER
@@ -232,6 +233,7 @@ namespace UnitySkills
                             change = CaptureReordered(UnityObjectIdUtility.EntityKey(orderArgs.instanceId));
 #endif
                             break;
+#endif
 
 #if UNITY_6000_0_OR_NEWER
                         case ObjectChangeKind.ChangeRootOrder:

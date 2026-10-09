@@ -601,8 +601,13 @@ namespace UnitySkills
                 var srcSO = new SerializedObject(source);
                 var srcProp = srcSO.FindProperty(propertyPath);
                 if (liveProp == null || srcProp == null) continue;
+#if UNITY_2022_1_OR_NEWER
                 try { srcProp.boxedValue = liveProp.boxedValue; }
                 catch { continue; /* Not every property type supports boxedValue */ }
+#else
+                try { srcSO.CopyFromSerializedProperty(liveProp); }
+                catch { continue; }
+#endif
                 srcSO.ApplyModifiedProperties();
                 EditorUtility.SetDirty(source);
                 touchedSources.Add(source);
@@ -629,8 +634,13 @@ namespace UnitySkills
                 var liveProp = liveSO.FindProperty(propertyPath);
                 var srcProp = new SerializedObject(source).FindProperty(propertyPath);
                 if (liveProp == null || srcProp == null) continue;
+#if UNITY_2022_1_OR_NEWER
                 try { liveProp.boxedValue = srcProp.boxedValue; }
                 catch { continue; /* Not every property type supports boxedValue */ }
+#else
+                try { liveSO.CopyFromSerializedProperty(srcProp); }
+                catch { continue; }
+#endif
                 liveSO.ApplyModifiedProperties();
                 EditorUtility.SetDirty(live);
             }

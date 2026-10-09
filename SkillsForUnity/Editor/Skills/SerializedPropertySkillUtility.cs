@@ -369,7 +369,7 @@ namespace UnitySkills
                 case SerializedPropertyType.Character:
                     return property.intValue.ToString(CultureInfo.InvariantCulture);
                 case SerializedPropertyType.Gradient:
-                    var gradient = property.gradientValue;
+                    var gradient = GetGradientValue(property);
                     return gradient == null
                         ? "null"
                         : $"Gradient(colorKeys={gradient.colorKeys.Length},alphaKeys={gradient.alphaKeys.Length},mode={gradient.mode})";
@@ -503,6 +503,31 @@ namespace UnitySkills
             return true;
         }
 
+        private static Gradient GetGradientValue(SerializedProperty property)
+        {
+#if UNITY_2022_1_OR_NEWER
+            return property.gradientValue;
+#else
+            return GradientValueProperty?.GetValue(property) as Gradient;
+#endif
+        }
+
+        private static void SetGradientValue(SerializedProperty property, Gradient gradient)
+        {
+#if UNITY_2022_1_OR_NEWER
+            property.gradientValue = gradient;
+#else
+            GradientValueProperty?.SetValue(property, gradient);
+#endif
+        }
+
+#if !UNITY_2022_1_OR_NEWER
+        // gradientValue is internal before 2022.1.
+        private static readonly System.Reflection.PropertyInfo GradientValueProperty =
+            typeof(SerializedProperty).GetProperty("gradientValue",
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Public);
+#endif
+
         private static bool TrySetGradient(SerializedProperty property, string value, out string error)
         {
             error = null;
@@ -548,7 +573,7 @@ namespace UnitySkills
                 gradient.mode = gradientMode;
             }
 
-            property.gradientValue = gradient;
+            SetGradientValue(property, gradient);
             return true;
         }
 

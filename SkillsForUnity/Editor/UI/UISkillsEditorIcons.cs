@@ -24,7 +24,9 @@ namespace UnitySkills
                 return;
 
             button.style.backgroundImage = new StyleBackground(icon);
+#if UNITY_2022_1_OR_NEWER
             button.style.backgroundSize = new BackgroundSize(BackgroundSizeType.Contain);
+#endif
         }
     }
 }

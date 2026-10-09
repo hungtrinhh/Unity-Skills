@@ -298,6 +298,7 @@ namespace UnitySkills
 
         private static void DrawLeftTriangle(MeshGenerationContext context)
         {
+#if UNITY_2022_2_OR_NEWER
             var rect = context.visualElement.contentRect;
             if (rect.width <= 0f || rect.height <= 0f) return;
             var painter = context.painter2D;
@@ -311,10 +312,12 @@ namespace UnitySkills
             painter.LineTo(new Vector2(rect.xMax - 1f, rect.yMax));
             painter.ClosePath();
             painter.Fill();
+#endif
         }
 
         private static void DrawRightTriangle(MeshGenerationContext context)
         {
+#if UNITY_2022_2_OR_NEWER
             var rect = context.visualElement.contentRect;
             if (rect.width <= 0f || rect.height <= 0f) return;
             var painter = context.painter2D;
@@ -328,6 +331,7 @@ namespace UnitySkills
             painter.LineTo(new Vector2(rect.xMin + 1f, rect.yMax));
             painter.ClosePath();
             painter.Fill();
+#endif
         }
 
         private void ScrollTabBar(float deltaX)
@@ -881,8 +885,12 @@ namespace UnitySkills
                 _list.makeItem = MakeRow;
                 _list.bindItem = BindRow;
                 _list.selectionType = SelectionType.Single;
+#if UNITY_2022_2_OR_NEWER
                 // Unity 6 / 2022.2+ uses selectedIndicesChanged; the old API still works but is obsolete.
                 _list.selectedIndicesChanged += _ => RefreshDetail();
+#else
+                _list.onSelectionChange += _ => RefreshDetail();
+#endif
             }
 
             Reload();

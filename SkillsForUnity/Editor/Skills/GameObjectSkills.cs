@@ -756,7 +756,12 @@ namespace UnitySkills
             int clampedIndex = Mathf.Clamp(index, 0, siblingCount - 1);
 
             WorkflowManager.SnapshotObject(t);
+#if UNITY_2022_2_OR_NEWER
             Undo.SetSiblingIndex(t, clampedIndex, "Set Sibling Index");
+#else
+            Undo.SetTransformParent(t, t.parent, "Set Sibling Index");
+            t.SetSiblingIndex(clampedIndex);
+#endif
 
             return new
             {

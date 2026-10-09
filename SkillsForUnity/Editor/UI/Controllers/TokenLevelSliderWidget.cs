@@ -466,6 +466,7 @@ namespace UnitySkills
 
         private void DrawTokenSlider(MeshGenerationContext mgc)
         {
+#if UNITY_2022_2_OR_NEWER
             if (_tokenLevelTrack == null) return;
             Rect rect = _tokenLevelTrack.contentRect;
             if (rect.width <= 0 || rect.height <= 0) return;
@@ -715,6 +716,7 @@ namespace UnitySkills
             painter.BeginPath();
             painter.Arc(thumbCenter, thumbR, 0f, 360f);
             painter.Stroke();
+#endif
         }
 
         private static Color EvaluateMaximumTrackColor(float u, float v, float time, float dynamicBlend)
