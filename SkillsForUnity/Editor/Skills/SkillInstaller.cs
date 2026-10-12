@@ -3,6 +3,7 @@ using UnityEditor;
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Text;
 using System.Text.RegularExpressions;
 using Newtonsoft.Json.Linq;
@@ -95,8 +96,11 @@ namespace UnitySkills
             try
             {
                 var targetPath = global ? ClaudeGlobalPath : ClaudeProjectPath;
-                return InstallSkill(targetPath, "Claude Code", AgentInstructionService.AgentClaudeCode,
+                var result = InstallSkill(targetPath, "Claude Code", AgentInstructionService.AgentClaudeCode,
                     AgentInstructionService.GetInstructionFilePath(AgentInstructionService.AgentClaudeCode, global));
+                if (result.success)
+                    RegisterClaudeMcpServer(targetPath);
+                return result;
             }
             catch (Exception ex)
             {
@@ -123,7 +127,11 @@ namespace UnitySkills
             try
             {
                 var targetPath = global ? ClaudeGlobalPath : ClaudeProjectPath;
-                return UninstallSkill(targetPath, "Claude Code");
+                var result = UninstallSkill(targetPath, "Claude Code");
+                // The project-level .mcp.json entry points at one specific install, so it only goes away with that copy.
+                if (result.success)
+                    UnregisterClaudeMcpServer(targetPath);
+                return result;
             }
             catch (Exception ex)
             {
@@ -422,6 +430,85 @@ namespace UnitySkills
             catch (Exception ex)
             {
                 return (false, ex.Message);
+            }
+        }
+
+        // Claude Code reads project-scoped MCP servers from <project>/.mcp.json. Registering the bridge there makes
+        // Unity show up in the agent's tool list on its own, instead of only when the skill happens to trigger.
+        private const string McpServerKey = "unity-skills";
+        private const string McpScriptName = "unity_skills_mcp.py";
+
+        private static string ClaudeMcpConfigPath => Path.GetFullPath(Path.Combine(Application.dataPath, "..", ".mcp.json"));
+
+        private static void RegisterClaudeMcpServer(string skillPath)
+        {
+            // The skill install is already done; a failed MCP registration must not turn it into a failure.
+            try
+            {
+                var script = Path.GetFullPath(Path.Combine(skillPath, "scripts", McpScriptName));
+                if (!File.Exists(script))
+                {
+                    SkillsLogger.LogWarning($"MCP bridge script not found, skipped .mcp.json registration: {script}");
+                    return;
+                }
+
+                var configPath = ClaudeMcpConfigPath;
+                var root = File.Exists(configPath) ? JObject.Parse(File.ReadAllText(configPath, Encoding.UTF8)) : new JObject();
+                var servers = root["mcpServers"] as JObject;
+                if (servers == null)
+                {
+                    servers = new JObject();
+                    root["mcpServers"] = servers;
+                }
+
+                servers[McpServerKey] = new JObject
+                {
+                    ["command"] = Application.platform == RuntimePlatform.WindowsEditor ? "python" : "python3",
+                    ["args"] = new JArray(script)
+                };
+
+                File.WriteAllText(configPath, root.ToString(Newtonsoft.Json.Formatting.Indented), SkillsCommon.Utf8NoBom);
+                SkillsLogger.LogVerbose($"Registered MCP bridge in {configPath}");
+            }
+            catch (Exception ex)
+            {
+                SkillsLogger.LogWarning($"Could not register the MCP bridge in .mcp.json: {ex.Message}");
+            }
+        }
+
+        private static void UnregisterClaudeMcpServer(string skillPath)
+        {
+            try
+            {
+                var configPath = ClaudeMcpConfigPath;
+                if (!File.Exists(configPath))
+                    return;
+
+                var root = JObject.Parse(File.ReadAllText(configPath, Encoding.UTF8));
+                var servers = root["mcpServers"] as JObject;
+                var entry = servers?[McpServerKey] as JObject;
+                if (entry == null)
+                    return;
+
+                // Only drop the entry that belongs to the copy being uninstalled. A project and a global install share
+                // this one file, and the other copy's registration must survive.
+                var script = Path.GetFullPath(Path.Combine(skillPath, "scripts", McpScriptName));
+                var registered = (entry["args"] as JArray)?.FirstOrDefault()?.ToString();
+                if (registered == null || !string.Equals(Path.GetFullPath(registered), script, StringComparison.OrdinalIgnoreCase))
+                    return;
+
+                servers.Remove(McpServerKey);
+                if (servers.Count == 0)
+                    root.Remove("mcpServers");
+
+                if (root.Count == 0)
+                    File.Delete(configPath);
+                else
+                    File.WriteAllText(configPath, root.ToString(Newtonsoft.Json.Formatting.Indented), SkillsCommon.Utf8NoBom);
+            }
+            catch (Exception ex)
+            {
+                SkillsLogger.LogWarning($"Could not remove the MCP bridge from .mcp.json: {ex.Message}");
             }
         }
 
