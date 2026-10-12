@@ -18,9 +18,11 @@ namespace UnitySkills
         [UnitySkill("decal_create", "Create a URP Decal Projector",
             Category = SkillCategory.Decal, Operation = SkillOperation.Create,
             Tags = new[] { "decal", "projector", "create", "urp" },
-            Outputs = new[] { "name", "instanceId" },
+            Outputs = new[] { "name", "instanceId", "material", "size" },
             // Mirrors the real (URP) branch so metadata stays identical when the package is absent.
-            MutatesScene = true)]
+            TracksWorkflow = true,
+            MutatesScene = true,
+            RequiresPackages = new[] { "com.unity.render-pipelines.universal" })]
         public static object DecalCreate(string name = "Decal Projector", string materialPath = null, float x = 0, float y = 0, float z = 0) => RenderPipelineSkillsCommon.NoURP();
 
         [UnitySkill("decal_get_info", "Get information about a Decal Projector",
@@ -31,6 +33,7 @@ namespace UnitySkills
             // below: the two variants are the same endpoint, and only one of them compiles in.
             RequiresInput = new[] { "gameObject" },
             ReadOnly = true,
+            RequiresPackages = new[] { "com.unity.render-pipelines.universal" },
             Mode = SkillMode.SemiAuto)]
         public static object DecalGetInfo(string name = null, int instanceId = 0, string path = null) => RenderPipelineSkillsCommon.NoURP();
 
@@ -39,7 +42,9 @@ namespace UnitySkills
             Tags = new[] { "decal", "projector", "modify" },
             Outputs = new[] { "name", "material", "size" },
             // Mirrors the real (URP) branch so metadata stays identical when the package is absent.
-            MutatesScene = true)]
+            TracksWorkflow = true, SkipAutoPresnapshot = true,
+            MutatesScene = true,
+            RequiresPackages = new[] { "com.unity.render-pipelines.universal" })]
         // The parameter list must stay byte-for-byte identical to the real URP-branch implementation:
         // in a no-URP CI project, the doc-consistency test can only see this stub, and one missing parameter would get the docs flagged as "has extra parameters".
         public static object DecalSetProperties(
@@ -64,6 +69,7 @@ namespace UnitySkills
             Tags = new[] { "decal", "projector", "list" },
             Outputs = new[] { "count", "decals" },
             ReadOnly = true,
+            RequiresPackages = new[] { "com.unity.render-pipelines.universal" },
             Mode = SkillMode.SemiAuto)]
         public static object DecalFindAll(int limit = 50) => RenderPipelineSkillsCommon.NoURP();
 
@@ -73,7 +79,9 @@ namespace UnitySkills
             Outputs = new[] { "deleted" },
             RiskLevel = "medium",
             // Mirrors the real (URP) branch so metadata stays identical when the package is absent.
-            MutatesScene = true)]
+            TracksWorkflow = true,
+            MutatesScene = true,
+            RequiresPackages = new[] { "com.unity.render-pipelines.universal" })]
         public static object DecalDelete(string name = null, int instanceId = 0, string path = null) => RenderPipelineSkillsCommon.NoURP();
 
         [UnitySkill("decal_set_properties_batch", "Modify multiple Decal Projectors in one request. items: JSON array of {name, instanceId, path, materialPath, drawDistance, fadeScale, fadeFactor, startAngleFade, endAngleFade, uvScale, uvBias, size, pivot, renderingLayerMask, scaleMode}",
@@ -81,7 +89,10 @@ namespace UnitySkills
             Tags = new[] { "decal", "projector", "batch" },
             Outputs = new[] { "successCount", "failCount", "results" },
             // Mirrors the real (URP) branch so metadata stays identical when the package is absent.
-            MutatesScene = true)]
+            TracksWorkflow = true,
+            MutatesScene = true,
+            RequiresInput = new[] { "items" },
+            RequiresPackages = new[] { "com.unity.render-pipelines.universal" })]
         public static object DecalSetPropertiesBatch(string items) => RenderPipelineSkillsCommon.NoURP();
 
         [UnitySkill("decal_ensure_renderer_feature", "Ensure the current URP renderer has a DecalRendererFeature",
@@ -89,7 +100,9 @@ namespace UnitySkills
             Tags = new[] { "decal", "renderer feature", "urp" },
             Outputs = new[] { "renderer", "feature" },
             // Mirrors the real (URP) branch so metadata stays identical when the package is absent.
-            MutatesAssets = true)]
+            TracksWorkflow = true,
+            MutatesAssets = true,
+            RequiresPackages = new[] { "com.unity.render-pipelines.universal" })]
         public static object DecalEnsureRendererFeature(string assetPath = null, int rendererIndex = -1, string rendererDataPath = null) => RenderPipelineSkillsCommon.NoURP();
 #else
         [UnitySkill("decal_create", "Create a URP Decal Projector",
@@ -165,68 +178,48 @@ namespace UnitySkills
             var projectorResult = GetProjector(name, instanceId, path);
             if (projectorResult.error != null) return projectorResult.error;
 
+            // Resolve and parse everything before the first write, so a rejected call leaves the projector untouched.
+            Material material = null;
+            if (!string.IsNullOrWhiteSpace(materialPath))
+            {
+                if (Validate.SafePath(materialPath, "materialPath") is object pathErr) return pathErr;
+                material = AssetDatabase.LoadAssetAtPath<Material>(materialPath);
+                if (material == null)
+                    return new { error = $"Material not found: {materialPath}" };
+            }
+
+            Vector2 parsedUvScale = default, parsedUvBias = default;
+            Vector3 parsedSize = default, parsedPivot = default;
+            if (!string.IsNullOrWhiteSpace(uvScale) && !TryParseVector2(uvScale, out parsedUvScale))
+                return new { error = $"Invalid uvScale '{uvScale}'. Use 'x,y'." };
+            if (!string.IsNullOrWhiteSpace(uvBias) && !TryParseVector2(uvBias, out parsedUvBias))
+                return new { error = $"Invalid uvBias '{uvBias}'. Use 'x,y'." };
+            if (!string.IsNullOrWhiteSpace(size) && !TryParseVector3(size, out parsedSize))
+                return new { error = $"Invalid size '{size}'. Use 'x,y,z'." };
+            if (!string.IsNullOrWhiteSpace(pivot) && !TryParseVector3(pivot, out parsedPivot))
+                return new { error = $"Invalid pivot '{pivot}'. Use 'x,y,z'." };
+            // Enum.TryParse also accepts integers with no declared member ("99").
+            if (!SkillParamUtil.TryParseEnumParam<DecalScaleMode>(scaleMode, "scaleMode", out var parsedScaleMode, out var scaleModeError))
+                return scaleModeError;
+
             var projector = projectorResult.projector;
             WorkflowManager.SnapshotObject(projector);
             Undo.RegisterCompleteObjectUndo(projector, "Modify Decal Projector");
 
-            if (!string.IsNullOrWhiteSpace(materialPath))
-            {
-                if (Validate.SafePath(materialPath, "materialPath") is object pathErr) return pathErr;
-                var material = AssetDatabase.LoadAssetAtPath<Material>(materialPath);
-                if (material == null)
-                    return new { error = $"Material not found: {materialPath}" };
-                projector.material = material;
-            }
-
+            if (material != null) projector.material = material;
             if (drawDistance.HasValue) projector.drawDistance = drawDistance.Value;
             if (fadeScale.HasValue) projector.fadeScale = fadeScale.Value;
             if (fadeFactor.HasValue) projector.fadeFactor = fadeFactor.Value;
             if (startAngleFade.HasValue) projector.startAngleFade = startAngleFade.Value;
             if (endAngleFade.HasValue) projector.endAngleFade = endAngleFade.Value;
-            if (!string.IsNullOrWhiteSpace(uvScale))
-            {
-                if (!TryParseVector2(uvScale, out var parsedUvScale))
-                    return new { error = $"Invalid uvScale '{uvScale}'. Use 'x,y'." };
-                projector.uvScale = parsedUvScale;
-            }
-
-            if (!string.IsNullOrWhiteSpace(uvBias))
-            {
-                if (!TryParseVector2(uvBias, out var parsedUvBias))
-                    return new { error = $"Invalid uvBias '{uvBias}'. Use 'x,y'." };
-                projector.uvBias = parsedUvBias;
-            }
-
-            if (!string.IsNullOrWhiteSpace(size))
-            {
-                if (!TryParseVector3(size, out var parsedSize))
-                    return new { error = $"Invalid size '{size}'. Use 'x,y,z'." };
-                projector.size = parsedSize;
-            }
-
-            if (!string.IsNullOrWhiteSpace(pivot))
-            {
-                if (!TryParseVector3(pivot, out var parsedPivot))
-                    return new { error = $"Invalid pivot '{pivot}'. Use 'x,y,z'." };
-                projector.pivot = parsedPivot;
-            }
-            if (renderingLayerMask.HasValue)
-            {
-                var serializedObject = new SerializedObject(projector);
-                var property = serializedObject.FindProperty("m_RenderingLayerMask");
-                if (property != null)
-                {
-                    property.intValue = unchecked((int)renderingLayerMask.Value);
-                    serializedObject.ApplyModifiedPropertiesWithoutUndo();
-                }
-            }
-
-            if (!string.IsNullOrWhiteSpace(scaleMode))
-            {
-                if (!Enum.TryParse(scaleMode, true, out DecalScaleMode parsedScaleMode))
-                    return new { error = $"Invalid scaleMode '{scaleMode}'. Valid values: {string.Join(", ", Enum.GetNames(typeof(DecalScaleMode)))}" };
-                projector.scaleMode = parsedScaleMode;
-            }
+            if (!string.IsNullOrWhiteSpace(uvScale)) projector.uvScale = parsedUvScale;
+            if (!string.IsNullOrWhiteSpace(uvBias)) projector.uvBias = parsedUvBias;
+            if (!string.IsNullOrWhiteSpace(size)) projector.size = parsedSize;
+            if (!string.IsNullOrWhiteSpace(pivot)) projector.pivot = parsedPivot;
+            // Through the public property: URP 14 serializes the mask as m_DecalLayerMask, so the old
+            // SerializedObject write to m_RenderingLayerMask did nothing on 2022.3 while reporting success.
+            if (renderingLayerMask.HasValue) projector.renderingLayerMask = renderingLayerMask.Value;
+            if (!string.IsNullOrWhiteSpace(scaleMode)) projector.scaleMode = parsedScaleMode;
 
             EditorUtility.SetDirty(projector);
             return DescribeProjector(projector);
@@ -362,9 +355,6 @@ namespace UnitySkills
 
         private static object DescribeProjector(DecalProjector projector)
         {
-            var serializedObject = new SerializedObject(projector);
-            var renderingLayerMaskProperty = serializedObject.FindProperty("m_RenderingLayerMask");
-
             return new
             {
                 success = true,
@@ -386,7 +376,7 @@ namespace UnitySkills
                 uvBias = RenderPipelineSkillsCommon.ToSerializableValue(projector.uvBias),
                 size = RenderPipelineSkillsCommon.ToSerializableValue(projector.size),
                 pivot = RenderPipelineSkillsCommon.ToSerializableValue(projector.pivot),
-                renderingLayerMask = renderingLayerMaskProperty != null ? (uint)renderingLayerMaskProperty.intValue : 0u,
+                renderingLayerMask = (uint)projector.renderingLayerMask,
                 scaleMode = projector.scaleMode.ToString()
             };
         }

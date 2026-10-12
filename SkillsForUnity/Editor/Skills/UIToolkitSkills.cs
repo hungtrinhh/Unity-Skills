@@ -743,6 +743,8 @@ namespace UnitySkills
         {
             if (Validate.Required(template, "template") is object tErr) return tErr;
             if (Validate.SafePath(savePath, "savePath") is object pErr) return pErr;
+            if (!TemplateNames.Contains(template.Trim().ToLowerInvariant()))
+                return SkillParamUtil.InvalidValueError(template, "template", TemplateNames);
 
             var dir = savePath.TrimEnd('/', '\\');
             var uiName = !string.IsNullOrEmpty(name)
@@ -758,7 +760,7 @@ namespace UnitySkills
             if (!Directory.Exists(dir))
                 Directory.CreateDirectory(dir);
 
-            GetTemplateContent(template.ToLower(), uiName, $"{uiName}.uss", out var ussContent, out var uxmlContent);
+            GetTemplateContent(template.Trim().ToLowerInvariant(), uiName, $"{uiName}.uss", out var ussContent, out var uxmlContent);
 
             File.WriteAllText(ussFilePath, ussContent, SkillsCommon.Utf8NoBom);
             File.WriteAllText(uxmlFilePath, uxmlContent, SkillsCommon.Utf8NoBom);
@@ -1120,6 +1122,9 @@ namespace UnitySkills
             return new { tag, attributes = attrs, children };
         }
 
+        private static readonly string[] TemplateNames =
+            { "menu", "hud", "dialog", "settings", "inventory", "list", "tab-view", "toolbar", "card", "notification" };
+
         private static void GetTemplateContent(string template, string uiName, string ussFilePath,
             out string ussContent, out string uxmlContent)
         {
@@ -1468,6 +1473,7 @@ $@"<?xml version=""1.0"" encoding=""utf-8""?>
             Category = SkillCategory.UIToolkit, Operation = SkillOperation.Modify,
             Tags = new[] { "add", "uxml", "element", "visual-element" },
             Outputs = new[] { "path", "elementType", "elementName", "parentName" },
+            RequiredParams = new[] { "elementType" },
             RequiresInput = new[] { "filePath" },
             TracksWorkflow = true,
             MutatesAssets = true)]
@@ -1629,6 +1635,7 @@ $@"<?xml version=""1.0"" encoding=""utf-8""?>
             Category = SkillCategory.UIToolkit, Operation = SkillOperation.Create | SkillOperation.Modify,
             Tags = new[] { "uss", "rule", "selector", "style" },
             Outputs = new[] { "path", "selector", "action" },
+            RequiredParams = new[] { "selector", "properties" },
             RequiresInput = new[] { "filePath" },
             TracksWorkflow = true,
             MutatesAssets = true)]

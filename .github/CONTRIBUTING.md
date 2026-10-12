@@ -5,7 +5,7 @@ Thank you for contributing to Unity-Skills!
 
 ## Workflow | 贡献流程
 
-**All pull requests target the `beta` branch.** `main` only ever moves through the maintainer's `/release` flow, which fast-forwards it to a verified `beta` commit; a PR opened against `main` will be asked to retarget. | **所有 PR 一律合并到 `beta` 分支。** `main` 只通过维护者的 `/release` 流程线性推进到已验证的 `beta` 提交；提交到 `main` 的 PR 会被要求改回 `beta`。
+**All pull requests target the `beta` branch.** `main` only ever moves through the maintainer's `/release` flow, which moves it to a verified `beta` commit; a PR opened against `main` will be asked to retarget. | **所有 PR 一律合并到 `beta` 分支。** `main` 只通过维护者的 `/release` 流程线性推进到已验证的 `beta` 提交；提交到 `main` 的 PR 会被要求改回 `beta`。
 
 1. **Fork** this repository | Fork 本仓库
 2. **Branch from `beta` | 从 `beta` 切分支**:
@@ -47,7 +47,7 @@ The repository ships one verification matrix: **Unity Package Compile Matrix** (
 | `Project Version & Release Tag Consistency` | All version anchors agree | 所有版本锚点一致 |
 | `SKILL.md Frontmatter Compliance` | Skill docs frontmatter | Skill 文档 frontmatter |
 | `.meta Pairing & GUID Uniqueness` | `.meta` pairing, duplicate GUIDs | `.meta` 配对与 GUID 重复 |
-| `Unity <version> EditMode` × 6 | Compile + EditMode tests on 2022.3.62f1, 6000.0.76f1, 6000.2.0f1, 6000.3.18f1, 6000.4.12f1, 6000.5.0f1 | 6 个 Unity 版本上的编译与 EditMode 测试 |
+| `Unity <version> EditMode` × 6 | Compile + EditMode tests on 2022.3.62f1, 6000.0.76f1, 6000.2.11f1, 6000.3.18f1, 6000.4.12f1, 6000.5.0f1 | 6 个 Unity 版本上的编译与 EditMode 测试 |
 | `Test Summary & License Check` | Aggregates results; fails if any job did not succeed | 汇总结果；任一任务未成功即失败 |
 
 Dispatch it **from your fork**, on your feature branch: | 在**你自己的 fork** 上、针对你的分支手动触发：
@@ -66,7 +66,7 @@ Or: your fork → **Actions** → **Unity Package Compile Matrix** → **Run wor
 
 > Do **not** dispatch the matrix on the upstream repository and do **not** push tags: upstream runs consume the maintainer's Unity license quota and CI minutes, and tags belong to the `/release` flow. | **不要**在上游仓库触发矩阵，也**不要**推送 tag：上游运行会消耗维护者的 Unity 许可证配额与 CI 时长，tag 属于 `/release` 流程。
 
-> `Update Star History` (`.github/workflows/update-star-history.yml`) is a scheduled maintenance job gated to the default branch — contributors never need to run it. | `Update Star History`（`.github/workflows/update-star-history.yml`）是限定默认分支的定时维护任务，贡献者无需运行。
+> `Update Star History` (`.github/workflows/update-star-history.yml`) is a scheduled maintenance job gated to the default branch; its chart commits land on `main` only, never on `beta` — contributors never need to run it. | `Update Star History`（`.github/workflows/update-star-history.yml`）是限定默认分支的定时维护任务，图表提交只落在 `main`、不进 `beta`，贡献者无需运行。
 
 ### 3. Optional live check | 可选的真机检查
 
@@ -129,7 +129,7 @@ public static object SkillName(string name, float x = 0f)
 3. Return business errors with `SkillErrorResponse.Build(code, msg, ...)` instead of throwing; write operations register `Undo` and take a `WorkflowManager` snapshot. | 业务错误用 `SkillErrorResponse.Build(code, msg, ...)` 返回而不是抛异常；写操作要注册 `Undo` 并调用 `WorkflowManager` 快照。
 4. Document it in `SkillsForUnity/unity-skills~/skills/<module>/SKILL.md`. Advisory (design-guidance) modules are docs-only — no C# stub. | 在 `SkillsForUnity/unity-skills~/skills/<模块>/SKILL.md` 补文档。Advisory（设计指导）模块只有文档，不加 C# stub。
 5. Keep the bundled root `SKILL.md` lean — it is the always-loaded entry point and is kept within a tight token budget (~8 KB). New depth belongs in `skills/` or `references/`. | 随包根 `SKILL.md` 要保持精简——它是常驻加载的入口文档，有严格的 token 预算（约 8 KB）。新增细节请放到 `skills/` 或 `references/`。
-6. Run `/skillcheck` so the skill count (currently **805** REST skills across 54 functional modules + 28 advisory modules) stays in sync across `README.md`, `README_CN.md`, `agent.md` and the skill docs. | 运行 `/skillcheck`，让技能总数（当前 **805** 个 REST Skills，54 个功能模块 + 28 个 advisory 模块）在 `README.md`、`README_CN.md`、`agent.md` 与技能文档间保持同步。
+6. Run `/skillcheck` so the skill count (currently **805** REST skills across 54 functional modules + 28 advisory modules) stays in sync across `README.md`, `README_CN.md`, `AGENTS.md` and the skill docs. | 运行 `/skillcheck`，让技能总数（当前 **805** 个 REST Skills，54 个功能模块 + 28 个 advisory 模块）在 `README.md`、`README_CN.md`、`AGENTS.md` 与技能文档间保持同步。
 
 ## Version Update | 版本号更新
 
@@ -138,7 +138,7 @@ Maintainer-only. `/updateversion <version>` updates the explicit project-version
 | File | Location |
 |------|----------|
 | `SkillsForUnity/Editor/Skills/SkillsLogger.cs` | `Version` constant (single C# source of truth) |
-| `agent.md` | Version table |
+| `AGENTS.md` | Version table |
 | `SkillsForUnity/package.json` | `"version"` field |
 | `CHANGELOG.md` | Add new entry at top |
 | `SkillsForUnity/unity-skills~/scripts/unity_skills.py` | `__version__` |

@@ -1,5 +1,6 @@
 ﻿using UnityEngine;
 using UnityEditor;
+using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -15,10 +16,16 @@ namespace UnitySkills
             Category = SkillCategory.Asset, Operation = SkillOperation.Create,
             Tags = new[] { "import", "copy", "external" },
             Outputs = new[] { "imported" },
+            RequiredParams = new[] { "sourcePath", "destinationPath" },
             TracksWorkflow = true,
             MutatesAssets = true, RiskLevel = "high")]
-        public static object AssetImport(string sourcePath, string destinationPath)
+        public static object AssetImport(
+            [SkillParam("Any real filesystem path, absolute or relative to the project root; unlike destinationPath it need not be inside Assets/.")]
+            string sourcePath,
+            string destinationPath)
         {
+            if (Validate.Required(sourcePath, "sourcePath") is object sourceErr) return sourceErr;
+            if (Validate.Required(destinationPath, "destinationPath") is object destErr) return destErr;
             bool isDir = Directory.Exists(sourcePath);
             if (!File.Exists(sourcePath) && !isDir)
                 return new { error = $"Source not found: {sourcePath}" };
@@ -117,6 +124,7 @@ namespace UnitySkills
             Category = SkillCategory.Asset, Operation = SkillOperation.Modify,
             Tags = new[] { "move", "rename", "reorganize" },
             Outputs = new[] { "from", "to" },
+            RequiredParams = new[] { "sourcePath", "destinationPath" },
             RequiresInput = new[] { "assetPath" },
             TracksWorkflow = true, SkipAutoPresnapshot = true,
             MutatesAssets = true, RiskLevel = "medium")]
@@ -164,7 +172,9 @@ namespace UnitySkills
             RequiresInput = new[] { "items" },
             TracksWorkflow = true, MutatesAssets = true,
             RiskLevel = "high")]
-        public static object AssetImportBatch(string items)
+        public static object AssetImportBatch(
+            [SkillParam("JSON array of {sourcePath, destinationPath}; each copies sourcePath's file to destinationPath, as asset_import.")]
+            string items)
         {
             return BatchExecutor.Execute<BatchImportItem>(items, item =>
             {
@@ -220,7 +230,9 @@ namespace UnitySkills
             RequiresInput = new[] { "items" },
             TracksWorkflow = true, SkipAutoPresnapshot = true, MutatesAssets = true,
             RiskLevel = "medium")]
-        public static object AssetDeleteBatch(string items)
+        public static object AssetDeleteBatch(
+            [SkillParam("JSON array of {path}; each path is deleted as in asset_delete.")]
+            string items)
         {
             return BatchExecutor.Execute<BatchDeleteItem>(items, item =>
             {
@@ -257,7 +269,9 @@ namespace UnitySkills
             RequiresInput = new[] { "items" },
             TracksWorkflow = true, SkipAutoPresnapshot = true, MutatesAssets = true,
             RiskLevel = "medium")]
-        public static object AssetMoveBatch(string items)
+        public static object AssetMoveBatch(
+            [SkillParam("JSON array of {sourcePath, destinationPath}; each moves/renames as in asset_move.")]
+            string items)
         {
             return BatchExecutor.Execute<BatchMoveItem>(items, item =>
             {
@@ -351,7 +365,10 @@ namespace UnitySkills
             RequiresInput = new[] { "searchFilter" },
             ReadOnly = true,
             Mode = SkillMode.SemiAuto)]
-        public static object AssetFind(string searchFilter, int limit = 50)
+        public static object AssetFind(
+            [SkillParam("Unity FindAssets syntax: name substrings and/or 't:Type' (e.g. t:Material), 'l:Label'; combine with spaces as AND. Not a path or glob.")]
+            string searchFilter,
+            int limit = 50)
         {
             var guids = AssetDatabase.FindAssets(searchFilter);
             var results = guids.Take(limit).Select(guid =>
@@ -401,7 +418,9 @@ namespace UnitySkills
             Outputs = new[] { "path", "guid" },
             RequiresInput = new[] { "items" },
             TracksWorkflow = true, SkipAutoPresnapshot = true, MutatesAssets = true)]
-        public static object AssetCreateFolderBatch(string items)
+        public static object AssetCreateFolderBatch(
+            [SkillParam("JSON array of {folderPath}; each creates one folder as in asset_create_folder.")]
+            string items)
         {
             return BatchExecutor.Execute<BatchFolderItem>(items, item =>
             {
@@ -426,24 +445,56 @@ namespace UnitySkills
 
         private class BatchFolderItem { public string folderPath; }
 
-        [UnitySkill("asset_refresh", "Refresh the Asset Database",
+        private const int MaxListedScriptChanges = 20;
+
+        internal static Action RefreshOverrideForTests;
+
+        [UnitySkill("asset_refresh", "Refresh the Asset Database (no parameters) so Unity imports files changed outside the Editor, e.g. a .cs you wrote with your own file tools. When the refresh starts a script compilation it returns compileTriggered:true with jobId and waitUrl: GET the waitUrl (/jobs/<jobId>?wait=90) to get the compile result in one call.",
             Category = SkillCategory.Asset, Operation = SkillOperation.Execute,
             Tags = new[] { "refresh", "reimport", "database" },
-            Outputs = new[] { "message" })]
+            Outputs = new[] { "message", "compileTriggered", "jobId", "waitUrl" })]
         public static object AssetRefresh()
         {
-            AssetDatabase.Refresh();
+            long refreshStartedUtcTicks = DateTime.UtcNow.Ticks;
+            int compilationStartsBefore = CompilationResultService.CompilationStartCount;
+            string[] scriptChanges;
+            using (var capture = ScriptDomainImportCapture.Begin())
+            {
+                if (RefreshOverrideForTests != null)
+                    RefreshOverrideForTests();
+                else
+                    AssetDatabase.Refresh();
+                scriptChanges = capture.Paths;
+            }
+
+            // Unity either compiles inside the refresh or queues the compilation right behind it, so any of the three
+            // signals means one is underway.
+            bool compileTriggered = scriptChanges.Length > 0 ||
+                                    CompilationResultService.CompilationStartCount != compilationStartsBefore ||
+                                    ServerAvailabilityHelper.IsCompilationInProgress();
 
             var result = new Dictionary<string, object>
             {
                 ["success"] = true,
-                ["message"] = "Asset database refreshed"
+                ["message"] = "Asset database refreshed",
+                ["compileTriggered"] = compileTriggered
             };
+            if (!compileTriggered)
+                return result;
+
+            var job = AsyncJobService.StartRefreshCompileJob(scriptChanges, refreshStartedUtcTicks);
+            result["status"] = "accepted";
+            result["jobId"] = job.jobId;
+            result["waitUrl"] = AsyncJobService.BuildWaitUrl(job.jobId);
+            if (scriptChanges.Length > 0)
+                result["scriptChanges"] = scriptChanges.Take(MaxListedScriptChanges).ToArray();
+            if (scriptChanges.Length > MaxListedScriptChanges)
+                result["scriptChangesTruncated"] = scriptChanges.Length - MaxListedScriptChanges;
 
             ServerAvailabilityHelper.AttachTransientUnavailableNotice(
                 result,
                 "AssetDatabase.Refresh may trigger a short asset refresh window. The REST server can be briefly unavailable if Unity starts recompiling scripts.",
-                alwaysInclude: false);
+                alwaysInclude: true);
 
             return result;
         }

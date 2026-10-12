@@ -106,7 +106,9 @@ namespace UnitySkills
             Tags = new[] { "canvas", "ugui", "overlay", "render-mode" },
             Outputs = new[] { "name", "instanceId", "renderMode" },
             TracksWorkflow = true, MutatesScene = true)]
-        public static object UICreateCanvas(string name = "Canvas", string renderMode = "ScreenSpaceOverlay")
+        public static object UICreateCanvas(string name = "Canvas",
+            [SkillParam("ScreenSpaceOverlay, ScreenSpaceCamera or WorldSpace (Unity's RenderMode enum names, case-insensitive).")]
+            string renderMode = "ScreenSpaceOverlay")
         {
             // Must be resolved before the Canvas is created. The old default branch silently produced a
             // ScreenSpaceOverlay canvas for any unrecognized value, so "Overlay" or "Camera" looked like it had taken effect.
@@ -137,7 +139,9 @@ namespace UnitySkills
             Tags = new[] { "panel", "ugui", "container", "background" },
             Outputs = new[] { "name", "instanceId", "parent" },
             TracksWorkflow = true, MutatesScene = true)]
-        public static object UICreatePanel(string name = "Panel", string parent = null, float r = 1, float g = 1, float b = 1, float a = 0.5f)
+        public static object UICreatePanel(string name = "Panel", string parent = null,
+            [SkillParam("r/g/b/a: colour channels as 0-1 floats (not 0-255).")]
+            float r = 1, float g = 1, float b = 1, float a = 0.5f)
         {
             var parentGo = FindOrCreateCanvas(parent);
             if (parentGo == null)
@@ -202,7 +206,9 @@ namespace UnitySkills
             Tags = new[] { "text", "ugui", "label", "tmp" },
             Outputs = new[] { "name", "instanceId", "parent", "usingTMP" },
             TracksWorkflow = true, MutatesScene = true)]
-        public static object UICreateText(string name = "Text", string parent = null, string text = "New Text", int fontSize = 14, float r = 0, float g = 0, float b = 0)
+        public static object UICreateText(string name = "Text", string parent = null, string text = "New Text", int fontSize = 14,
+            [SkillParam("r/g/b: colour channels as 0-1 floats (not 0-255).")]
+            float r = 0, float g = 0, float b = 0)
         {
             var parentGo = FindOrCreateCanvas(parent);
             if (parentGo == null)
@@ -229,6 +235,15 @@ namespace UnitySkills
             TracksWorkflow = true, MutatesScene = true)]
         public static object UICreateImage(string name = "Image", string parent = null, string spritePath = null, float width = 100, float height = 100)
         {
+            // Resolved before anything is created: an unresolvable path used to yield a sprite-less Image and success.
+            Sprite sprite = null;
+            if (!string.IsNullOrEmpty(spritePath))
+            {
+                sprite = AssetDatabase.LoadAssetAtPath<Sprite>(spritePath);
+                if (sprite == null)
+                    return new { error = $"Sprite not found: {spritePath} (missing, or the texture is not imported as Sprite)" };
+            }
+
             var parentGo = FindOrCreateCanvas(parent);
             if (parentGo == null)
                 return new { error = "Parent not found and could not create Canvas" };
@@ -240,13 +255,8 @@ namespace UnitySkills
             rectTransform.sizeDelta = new Vector2(width, height);
 
             var image = go.AddComponent<Image>();
-
-            if (!string.IsNullOrEmpty(spritePath))
-            {
-                var sprite = AssetDatabase.LoadAssetAtPath<Sprite>(spritePath);
-                if (sprite != null)
-                    image.sprite = sprite;
-            }
+            if (sprite != null)
+                image.sprite = sprite;
 
             Undo.RegisterCreatedObjectUndo(go, "Create Image");
             WorkflowManager.SnapshotObject(go, SnapshotType.Created);
@@ -260,8 +270,11 @@ namespace UnitySkills
             Outputs = new[] { "totalItems", "successCount", "failCount", "results" },
             RequiresInput = new[] { "items" },
             TracksWorkflow = true, MutatesScene = true)]
-        public static object UICreateBatch(string items)
+        public static object UICreateBatch(
+            [SkillParam("type: canvas/panel/button/text/image/inputfield/slider/toggle/dropdown/scrollview/rawimage/scrollbar; other fields match that type's ui_create_* parameters.")]
+            string items)
         {
+            var validTypes = new[] { "canvas", "panel", "button", "text", "image", "inputfield", "slider", "toggle", "dropdown", "scrollview", "rawimage", "scrollbar" };
             return BatchExecutor.Execute<BatchUIItem>(items, item =>
             {
                 object result;
@@ -304,7 +317,8 @@ namespace UnitySkills
                         result = UICreateScrollbar(item.name, item.parent, item.direction ?? "BottomToTop", item.value, item.size, (int)item.numberOfSteps);
                         break;
                     default:
-                        throw new System.Exception($"Unknown UI type: {item.type}");
+                        result = SkillParamUtil.InvalidValueError(item.type, "type", validTypes, item.type);
+                        break;
                 }
                 return result;
             }, item => item.type);
@@ -612,7 +626,10 @@ namespace UnitySkills
             Outputs = new[] { "count", "elements" },
             ReadOnly = true,
             Mode = SkillMode.SemiAuto)]
-        public static object UIFindAll(string uiType = null, int limit = 50)
+        public static object UIFindAll(
+            [SkillParam("Canvas, Button, Slider, Toggle, InputField, Text, Image, RawImage, RectTransform or Unknown (case-insensitive); omit for all types.")]
+            string uiType = null,
+            int limit = 50)
         {
             var canvases = FindHelper.FindAll<Canvas>();
             var results = new System.Collections.Generic.List<object>();
@@ -746,7 +763,7 @@ namespace UnitySkills
             rect.anchorMax = anchorMax;
             if (setPivot) rect.pivot = pivot;
 
-            return new { success = true, name = go.name, preset, anchorMin = $"({anchorMin.x}, {anchorMin.y})", anchorMax = $"({anchorMax.x}, {anchorMax.y})" };
+            return new { success = true, name = go.name, preset, anchorMin = SkillParamUtil.FormatVector2(anchorMin), anchorMax = SkillParamUtil.FormatVector2(anchorMax) };
         }
 
         [UnitySkill("ui_set_rect", "Set RectTransform size, position, and padding (offsets)",
@@ -758,7 +775,9 @@ namespace UnitySkills
         public static object UISetRect(
             string name = null, int instanceId = 0, string path = null,
             float? width = null, float? height = null,
+            [SkillParam("posX/posY: RectTransform.anchoredPosition, not world position; omitted axes keep their current value.")]
             float? posX = null, float? posY = null,
+            [SkillParam("left/right/top/bottom: RectTransform offsets from each edge, meaningful mainly when anchors are stretched; omitted sides keep their value.")]
             float? left = null, float? right = null, float? top = null, float? bottom = null)
         {
             var (go, error) = GameObjectFinder.FindOrError(name, instanceId, path);
@@ -800,7 +819,7 @@ namespace UnitySkills
                 rect.offsetMax = max;
             }
 
-            return new { success = true, name = go.name, sizeDelta = $"({rect.sizeDelta.x}, {rect.sizeDelta.y})", anchoredPosition = $"({rect.anchoredPosition.x}, {rect.anchoredPosition.y})" };
+            return new { success = true, name = go.name, sizeDelta = SkillParamUtil.FormatVector2(rect.sizeDelta), anchoredPosition = SkillParamUtil.FormatVector2(rect.anchoredPosition) };
         }
 
         [UnitySkill("ui_get_rect_transform", "Get full RectTransform data for a UI element",
@@ -829,16 +848,22 @@ namespace UnitySkills
             TracksWorkflow = true, MutatesScene = true)]
         public static object UISetRectTransform(
             string name = null, int instanceId = 0, string path = null,
+            [SkillParam("anchorMinX/Y and anchorMaxX/Y: 0-1 fractions of the parent rect.")]
             float? anchorMinX = null, float? anchorMinY = null,
             float? anchorMaxX = null, float? anchorMaxY = null,
+            [SkillParam("pivotX/Y: 0-1 fractions of this object's own rect (0.5 = centre).")]
             float? pivotX = null, float? pivotY = null,
+            [SkillParam("anchoredPosX/Y/Z: anchoredPosition3D, the pivot's offset from the anchor point; localPosX/Y/Z is applied after and wins on the same axis.")]
             float? anchoredPosX = null, float? anchoredPosY = null, float? anchoredPosZ = null,
+            [SkillParam("sizeDeltaX/Y: size relative to the distance between the anchors (equals the size when the anchors coincide).")]
             float? sizeDeltaX = null, float? sizeDeltaY = null,
+            [SkillParam("offsetMinX/Y, offsetMaxX/Y: corner offsets from the anchors; applied last, so they win over sizeDelta/anchoredPosition/width/height on the same axis.")]
             float? offsetMinX = null, float? offsetMinY = null,
             float? offsetMaxX = null, float? offsetMaxY = null,
             float? localPosX = null, float? localPosY = null, float? localPosZ = null,
             float? localRotX = null, float? localRotY = null, float? localRotZ = null,
             float? localScaleX = null, float? localScaleY = null, float? localScaleZ = null,
+            [SkillParam("width/height: rect size for the current anchors, applied after sizeDeltaX/Y and before offsetMinX/Y/offsetMaxX/Y.")]
             float? width = null, float? height = null)
         {
             var (go, error) = GameObjectFinder.FindOrError(name, instanceId, path);
@@ -867,7 +892,9 @@ namespace UnitySkills
             Outputs = new[] { "name", "anchorMin", "anchorMax", "anchoredPosition3D" },
             RequiresInput = new[] { "items" },
             TracksWorkflow = true, MutatesScene = true)]
-        public static object UISetRectTransformBatch(string items)
+        public static object UISetRectTransformBatch(
+            [SkillParam("JSON array mirroring ui_set_rect_transform's parameters per item: name|instanceId|path plus the same anchor/pivot/size/offset/local fields.")]
+            string items)
         {
             return BatchExecutor.Execute<BatchRectTransformItem>(items, item =>
             {
@@ -1264,6 +1291,7 @@ namespace UnitySkills
             string name = "ScrollView", string parent = null,
             float width = 300, float height = 200,
             bool horizontal = false, bool vertical = true,
+            [SkillParam("Unrestricted, Elastic or Clamped (ScrollRect.MovementType, case-insensitive).")]
             string movementType = "Elastic")
         {
             if (!SkillParamUtil.TryParseRequiredEnum<ScrollRect.MovementType>(movementType, "movementType", out var mt, out var movementTypeError))
@@ -1321,6 +1349,15 @@ namespace UnitySkills
             TracksWorkflow = true, MutatesScene = true)]
         public static object UICreateRawImage(string name = "RawImage", string parent = null, string texturePath = null, float width = 100, float height = 100)
         {
+            // Same as ui_create_image: an unresolvable path used to create a texture-less RawImage (hasTexture:false only).
+            Texture texture = null;
+            if (!string.IsNullOrEmpty(texturePath))
+            {
+                texture = AssetDatabase.LoadAssetAtPath<Texture>(texturePath);
+                if (texture == null)
+                    return new { error = $"Texture not found: {texturePath}" };
+            }
+
             var parentGo = FindOrCreateCanvas(parent);
             if (parentGo == null)
                 return new { error = "Parent not found and could not create Canvas" };
@@ -1332,13 +1369,8 @@ namespace UnitySkills
             rectTransform.sizeDelta = new Vector2(width, height);
 
             var rawImage = go.AddComponent<RawImage>();
-
-            if (!string.IsNullOrEmpty(texturePath))
-            {
-                var texture = AssetDatabase.LoadAssetAtPath<Texture>(texturePath);
-                if (texture != null)
-                    rawImage.texture = texture;
-            }
+            if (texture != null)
+                rawImage.texture = texture;
 
             Undo.RegisterCreatedObjectUndo(go, "Create RawImage");
             WorkflowManager.SnapshotObject(go, SnapshotType.Created);
@@ -1353,6 +1385,7 @@ namespace UnitySkills
             TracksWorkflow = true, MutatesScene = true)]
         public static object UICreateScrollbar(
             string name = "Scrollbar", string parent = null,
+            [SkillParam("LeftToRight, RightToLeft, TopToBottom or BottomToTop (case-insensitive); also selects the bar's long axis (horizontal vs vertical).")]
             string direction = "BottomToTop", float value = 0, float size = 0.2f, int numberOfSteps = 0)
         {
             // Resolve first: direction also determines the sizeDelta axis below, so a parse failure would
@@ -1416,8 +1449,12 @@ namespace UnitySkills
             TracksWorkflow = true, MutatesScene = true)]
         public static object UISetImage(
             string name = null, int instanceId = 0, string path = null,
+            [SkillParam("Simple, Sliced, Tiled or Filled (Image.Type, case-insensitive).")]
             string type = null,
-            string fillMethod = null, float? fillAmount = null, bool? fillClockwise = null, int? fillOrigin = null,
+            [SkillParam("Horizontal, Vertical, Radial90, Radial180 or Radial360 (case-insensitive); only affects rendering when type=Filled.")]
+            string fillMethod = null, float? fillAmount = null, bool? fillClockwise = null,
+            [SkillParam("Meaning depends on fillMethod: an index (0-3) into that method's own Origin enum (e.g. OriginHorizontal for Horizontal).")]
+            int? fillOrigin = null,
             bool? preserveAspect = null, string spritePath = null, float? pixelsPerUnitMultiplier = null)
         {
             var (go, error) = GameObjectFinder.FindOrError(name, instanceId, path);
@@ -1517,6 +1554,7 @@ namespace UnitySkills
             TracksWorkflow = true, MutatesScene = true)]
         public static object UIAddCanvasGroup(
             string name = null, int instanceId = 0, string path = null,
+            [SkillParam("0-1 float (not 0-255).")]
             float? alpha = null, bool? interactable = null,
             bool? blocksRaycasts = null, bool? ignoreParentGroups = null)
         {
@@ -1594,7 +1632,9 @@ namespace UnitySkills
             TracksWorkflow = true, MutatesScene = true)]
         public static object UIAddOutline(
             string name = null, int instanceId = 0, string path = null,
+            [SkillParam("Outline or Shadow (case-insensitive); any other value is rejected.")]
             string effectType = "Outline",
+            [SkillParam("r/g/b/a: colour channels as 0-1 floats (not 0-255).")]
             float r = 0, float g = 0, float b = 0, float a = 0.5f,
             float distanceX = 1, float distanceY = -1,
             bool useGraphicAlpha = true)
@@ -1602,19 +1642,27 @@ namespace UnitySkills
             var (go, error) = GameObjectFinder.FindOrError(name, instanceId, path);
             if (error != null) return error;
 
+            bool isShadow = effectType.Equals("Shadow", StringComparison.OrdinalIgnoreCase);
+            bool isOutline = effectType.Equals("Outline", StringComparison.OrdinalIgnoreCase);
+            if (!isShadow && !isOutline)
+                return SkillParamUtil.InvalidValueError(effectType, "effectType", new[] { "Outline", "Shadow" });
+
             WorkflowManager.SnapshotObject(go);
             Undo.RecordObject(go, "Add Effect");
 
             var effectColor = new Color(r, g, b, a);
             var effectDistance = new Vector2(distanceX, distanceY);
 
+            // Outline is a subclass of Shadow, so a single reference reads back whichever was added.
+            Shadow addedEffect;
             string applied;
-            if (effectType.Equals("Shadow", StringComparison.OrdinalIgnoreCase))
+            if (isShadow)
             {
                 var shadow = Undo.AddComponent<Shadow>(go);
                 shadow.effectColor = effectColor;
                 shadow.effectDistance = effectDistance;
                 shadow.useGraphicAlpha = useGraphicAlpha;
+                addedEffect = shadow;
                 applied = "Shadow";
             }
             else
@@ -1623,10 +1671,17 @@ namespace UnitySkills
                 outline.effectColor = effectColor;
                 outline.effectDistance = effectDistance;
                 outline.useGraphicAlpha = useGraphicAlpha;
+                addedEffect = outline;
                 applied = "Outline";
             }
 
-            return new { success = true, name = go.name, effectType = applied, effectColor = $"({r},{g},{b},{a})", effectDistance = $"({distanceX},{distanceY})" };
+            return new {
+                success = true,
+                name = go.name,
+                effectType = applied,
+                effectColor = $"({addedEffect.effectColor.r},{addedEffect.effectColor.g},{addedEffect.effectColor.b},{addedEffect.effectColor.a})",
+                effectDistance = $"({addedEffect.effectDistance.x},{addedEffect.effectDistance.y})"
+            };
         }
 
         [UnitySkill("ui_configure_selectable", "Configure Selectable properties (transition, colors, navigation) on a UI element",
@@ -1637,10 +1692,13 @@ namespace UnitySkills
             TracksWorkflow = true, MutatesScene = true)]
         public static object UIConfigureSelectable(
             string name = null, int instanceId = 0, string path = null,
+            [SkillParam("None, ColorTint, SpriteSwap or Animation (Selectable.Transition, case-insensitive).")]
             string transition = null,
             bool? interactable = null,
+            [SkillParam("None, Horizontal, Vertical, Automatic or Explicit (Navigation.Mode, case-insensitive).")]
             string navigationMode = null,
             // ColorBlock properties. Each channel (including alpha) defaults to the block's current value — see the TryMergeColor calls below.
+            [SkillParam("normalR/G/B/A, highlightedR/G/B/A, pressedR/G/B/A, disabledR/G/B/A: 0-1 floats; each omitted channel keeps the ColorBlock's current value.")]
             float? normalR = null, float? normalG = null, float? normalB = null, float? normalA = null,
             float? highlightedR = null, float? highlightedG = null, float? highlightedB = null, float? highlightedA = null,
             float? pressedR = null, float? pressedG = null, float? pressedB = null, float? pressedA = null,

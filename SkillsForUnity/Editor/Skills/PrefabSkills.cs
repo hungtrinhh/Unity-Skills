@@ -14,11 +14,14 @@ namespace UnitySkills
         [UnitySkill("prefab_create", "Create a prefab from a GameObject",
             Category = SkillCategory.Prefab, Operation = SkillOperation.Create,
             Tags = new[] { "prefab", "asset", "save", "create" },
-            Outputs = new[] { "prefabPath", "name" },
+            Outputs = new[] { "prefabPath", "name", "connected" },
+            RequiredParams = new[] { "savePath" },
             RequiresInput = new[] { "gameObject" },
             TracksWorkflow = true,
             MutatesScene = true, MutatesAssets = true, RiskLevel = "medium")]
-        public static object PrefabCreate(string name = null, int instanceId = 0, string path = null, string savePath = null)
+        public static object PrefabCreate(string name = null, int instanceId = 0, string path = null,
+            [SkillParam("Asset path under Assets/ (or a writable package); '.prefab' is appended when missing. An existing prefab there is overwritten.")]
+            string savePath = null)
         {
             if (Validate.Required(savePath, "savePath") is object reqErr) return reqErr;
             if (Validate.SafePath(savePath, "savePath") is object pathErr) return pathErr;
@@ -26,16 +29,30 @@ namespace UnitySkills
             var (go, findErr) = GameObjectFinder.FindOrError(name: name, instanceId: instanceId, path: path);
             if (findErr != null) return findErr;
 
+            savePath = WithPrefabExtension(savePath);
             var dir = Path.GetDirectoryName(savePath);
             if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
                 Directory.CreateDirectory(dir);
 
             var prefab = PrefabUtility.SaveAsPrefabAssetAndConnect(go, savePath, InteractionMode.UserAction);
+            if (prefab == null)
+                return new { error = $"Failed to save '{go.name}' as a prefab at '{savePath}'" };
 
             WorkflowManager.SnapshotCreatedAsset(prefab);
 
-            return new { success = true, prefabPath = savePath, name = prefab.name };
+            var prefabPath = AssetDatabase.GetAssetPath(prefab);
+            return new
+            {
+                success = true,
+                prefabPath,
+                name = prefab.name,
+                connected = PrefabUtility.GetPrefabAssetPathOfNearestInstanceRoot(go) == prefabPath
+            };
         }
+
+        // The planner predicts '<savePath>.prefab'; SaveAsPrefabAsset* rejects any other extension.
+        private static string WithPrefabExtension(string assetPath) =>
+            assetPath.EndsWith(".prefab", System.StringComparison.OrdinalIgnoreCase) ? assetPath : assetPath + ".prefab";
 
         [UnitySkill("prefab_instantiate", "Instantiate a prefab in the scene",
             Category = SkillCategory.Prefab, Operation = SkillOperation.Create,
@@ -43,7 +60,9 @@ namespace UnitySkills
             Outputs = new[] { "name", "instanceId" },
             RequiresInput = new[] { "prefabPath" },
             TracksWorkflow = true, MutatesScene = true)]
-        public static object PrefabInstantiate(string prefabPath, float x = 0, float y = 0, float z = 0, string name = null,
+        public static object PrefabInstantiate(string prefabPath,
+            [SkillParam("x/y/z: localPosition relative to the given parent; with no parent* locator, equals world position (scene root).")]
+            float x = 0, float y = 0, float z = 0, string name = null,
             string parentName = null, int parentInstanceId = 0, string parentPath = null, string parentEntityId = null)
         {
             GameObject parentGo = null;
@@ -82,7 +101,9 @@ namespace UnitySkills
             Outputs = new[] { "results", "name", "instanceId", "position" },
             RequiresInput = new[] { "items" },
             TracksWorkflow = true, MutatesScene = true)]
-        public static object PrefabInstantiateBatch(string items)
+        public static object PrefabInstantiateBatch(
+            [SkillParam("JSON array of {prefabPath, x/y/z?, name?, rotX/Y/Z?, scaleX/Y/Z? (default 1), parentName|parentPath|parentInstanceId|parentEntityId?}.")]
+            string items)
         {
             // Cache loaded prefabs to avoid repeated AssetDatabase round trips
             var prefabCache = new System.Collections.Generic.Dictionary<string, GameObject>();
@@ -109,15 +130,20 @@ namespace UnitySkills
                 if (prefab == null)
                     return new { error = $"Prefab not found: {item.prefabPath}" };
 
+                // Resolved before instantiating, so a bad parent leaves no stray instance behind.
+                GameObject parentGo = null;
+                if (!string.IsNullOrEmpty(item.parentEntityId) || !string.IsNullOrEmpty(item.parentName) || item.parentInstanceId != 0 || !string.IsNullOrEmpty(item.parentPath))
+                {
+                    var (foundParent, parentErr) = GameObjectFinder.FindOrError(item.parentName, item.parentInstanceId, item.parentPath, entityId: item.parentEntityId);
+                    if (parentErr != null) return new { error = $"Parent not found for '{item.name ?? item.prefabPath}'" };
+                    parentGo = foundParent;
+                }
+
                 var instance = PrefabUtility.InstantiatePrefab(prefab) as GameObject;
                 if (instance == null)
                     return new { error = $"Failed to instantiate prefab: {item.prefabPath}" };
-                if (!string.IsNullOrEmpty(item.parentEntityId) || !string.IsNullOrEmpty(item.parentName) || item.parentInstanceId != 0 || !string.IsNullOrEmpty(item.parentPath))
-                {
-                    var (parentGo, parentErr) = GameObjectFinder.FindOrError(item.parentName, item.parentInstanceId, item.parentPath, entityId: item.parentEntityId);
-                    if (parentErr != null) return new { error = $"Parent not found for '{item.name ?? item.prefabPath}'" };
+                if (parentGo != null)
                     instance.transform.SetParent(parentGo.transform, false);
-                }
 
                 instance.transform.localPosition = new Vector3(item.x, item.y, item.z);
 
@@ -132,15 +158,18 @@ namespace UnitySkills
 
                 Undo.RegisterCreatedObjectUndo(instance, "Batch Instantiate Prefab");
                 WorkflowManager.SnapshotObject(instance, SnapshotType.Created);
+                var world = instance.transform.position;
+                var local = instance.transform.localPosition;
                 return new
                 {
                     success = true,
                     name = instance.name,
                     entityId = UnityObjectIdUtility.GetEntityId(instance),
                     instanceId = UnityObjectIdUtility.GetObjectId(instance),
-                    position = new { x = item.x, y = item.y, z = item.z }
+                    position = new { x = world.x, y = world.y, z = world.z },
+                    localPosition = new { x = local.x, y = local.y, z = local.z }
                 };
-            }, item => item.prefabPath);
+            }, item => item.prefabPath, atomic: true);
         }
 
         private class BatchInstantiateItem
@@ -317,7 +346,7 @@ namespace UnitySkills
             Category = SkillCategory.Prefab, Operation = SkillOperation.Modify,
             Tags = new[] { "prefab", "revert", "overrides", "reset" },
             Outputs = new[] { "reverted" },
-            RequiresInput = new[] { "gameObject" }, MutatesScene = true)]
+            RequiresInput = new[] { "gameObject" }, TracksWorkflow = true, MutatesScene = true)]
         public static object PrefabRevertOverrides(string name = null, int instanceId = 0)
         {
             var (go, findErr) = GameObjectFinder.FindOrError(name: name, instanceId: instanceId);
@@ -357,7 +386,8 @@ namespace UnitySkills
         [UnitySkill("prefab_create_variant", "Create a prefab variant from an existing prefab",
             Category = SkillCategory.Prefab, Operation = SkillOperation.Create,
             Tags = new[] { "prefab", "variant", "create", "inheritance" },
-            Outputs = new[] { "sourcePath", "variantPath", "name" },
+            Outputs = new[] { "sourcePath", "variantPath", "name", "isVariant" },
+            RequiredParams = new[] { "variantPath" },
             RequiresInput = new[] { "sourcePrefabPath" },
             TracksWorkflow = true, MutatesAssets = true)]
         public static object PrefabCreateVariant(string sourcePrefabPath, string variantPath)
@@ -368,15 +398,34 @@ namespace UnitySkills
             var source = AssetDatabase.LoadAssetAtPath<GameObject>(sourcePrefabPath);
             if (source == null) return new { error = $"Prefab not found: {sourcePrefabPath}" };
 
+            variantPath = WithPrefabExtension(variantPath);
             var dir = Path.GetDirectoryName(variantPath);
             if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir)) Directory.CreateDirectory(dir);
 
             var instance = PrefabUtility.InstantiatePrefab(source) as GameObject;
-            var variant = PrefabUtility.SaveAsPrefabAssetAndConnect(
-                instance, variantPath, InteractionMode.AutomatedAction);
-            Object.DestroyImmediate(instance);
+            if (instance == null) return new { error = $"Failed to instantiate prefab: {sourcePrefabPath}" };
+            GameObject variant;
+            try
+            {
+                variant = PrefabUtility.SaveAsPrefabAssetAndConnect(instance, variantPath, InteractionMode.AutomatedAction);
+            }
+            finally
+            {
+                Object.DestroyImmediate(instance);
+            }
+            if (variant == null)
+                return new { error = $"Failed to save a variant of '{sourcePrefabPath}' at '{variantPath}'" };
 
-            return new { success = true, sourcePath = sourcePrefabPath, variantPath, name = variant.name };
+            WorkflowManager.SnapshotCreatedAsset(variant);
+
+            return new
+            {
+                success = true,
+                sourcePath = sourcePrefabPath,
+                variantPath = AssetDatabase.GetAssetPath(variant),
+                name = variant.name,
+                isVariant = PrefabUtility.GetPrefabAssetType(variant) == PrefabAssetType.Variant
+            };
         }
 
         [UnitySkill("prefab_find_instances", "Find all instances of a prefab in the current scene",
@@ -406,6 +455,7 @@ namespace UnitySkills
             Category = SkillCategory.Prefab, Operation = SkillOperation.Modify,
             Tags = new[] { "prefab", "property", "set", "component", "asset" },
             Outputs = new[] { "prefabPath", "gameObject", "component", "property", "valueSet" },
+            RequiredParams = new[] { "propertyName" },
             // Cannot write "prefabAsset": across the whole codebase it appears here alone — this
             // skill doesn't accept that parameter (the asset comes in via prefabPath), and no skill
             // outputs it either, so this token constrains nothing and links nothing up; an agent
@@ -414,8 +464,14 @@ namespace UnitySkills
             RequiresInput = new[] { "prefabPath", "componentType" },
             TracksWorkflow = true, MutatesAssets = true)]
         public static object PrefabSetProperty(
-            string prefabPath = null, string componentType = null, string propertyName = null,
-            string value = null, string assetReferencePath = null, string gameObjectName = null)
+            string prefabPath = null, string componentType = null,
+            [SkillParam("Tries the exact name, then m_<Name>, _<name> and m_<name> (Unity's serialized-field naming conventions).")]
+            string propertyName = null,
+            string value = null,
+            [SkillParam("For an ObjectReference property; when given it is written and 'value' is ignored even if both are provided.")]
+            string assetReferencePath = null,
+            [SkillParam("Transform.Find path from the prefab root (e.g. 'Child/Grandchild'), or a bare name found anywhere in the hierarchy; omit for the root.")]
+            string gameObjectName = null)
         {
             if (Validate.Required(prefabPath, "prefabPath") is object reqErr1) return reqErr1;
             if (Validate.SafePath(prefabPath, "prefabPath") is object pathErr) return pathErr;
@@ -455,27 +511,30 @@ namespace UnitySkills
             if (prop == null)
                 return new { error = $"Property '{propertyName}' not found on {componentType}", availableProperties = ListSerializedProperties(so) };
 
-            WorkflowManager.SnapshotObject(comp);
+            UnityEngine.Object requestedAsset = null;
+            string intended = null;
+            string warning = null;
 
-            // Dispatch the write based on the property type
+            // Dispatch the write based on the property type; only the SerializedObject copy changes until it is applied.
             if (!string.IsNullOrEmpty(assetReferencePath))
             {
                 if (prop.propertyType != SerializedPropertyType.ObjectReference)
                     return new { error = $"Property '{propertyName}' is not an Object reference field (type: {prop.propertyType})" };
 
-                var asset = AssetDatabase.LoadAssetAtPath<UnityEngine.Object>(assetReferencePath);
-                if (asset == null)
+                requestedAsset = AssetDatabase.LoadAssetAtPath<UnityEngine.Object>(assetReferencePath);
+                if (requestedAsset == null)
                     return new { error = $"Asset not found: {assetReferencePath}" };
 
-                prop.objectReferenceValue = asset;
+                prop.objectReferenceValue = requestedAsset;
             }
             else if (!string.IsNullOrEmpty(value))
             {
                 bool applied = false;
                 bool typeSupported = true;
+                string parseError = null;
                 try
                 {
-                    applied = SetSerializedPropertyValue(prop, value, out typeSupported);
+                    applied = SetSerializedPropertyValue(prop, value, out typeSupported, out parseError, out warning);
                 }
                 catch (System.Exception ex)
                 {
@@ -497,29 +556,58 @@ namespace UnitySkills
                     // so SkillErrorClassifier's leading-word rule yields SEMANTIC_INVALID + fix_and_retry,
                     // instead of the unclassified SKILL_ERROR + abort the old wording
                     // "Failed to set value …" used to produce.
-                    return typeSupported
-                        ? new { error = $"Invalid value '{value}' for property '{propertyName}' (type: {prop.propertyType}) — that property type is supported but the text could not be parsed into it." }
-                        : new { error = $"Unsupported serialized property type {prop.propertyType} for property '{propertyName}'. prefab_set_property writes Integer, Float, Boolean, String, Enum, Color, Vector2/3/4, Vector2Int/3Int, Quaternion, Rect, Bounds and LayerMask from 'value'; use assetReferencePath for an ObjectReference field." };
+                    if (!typeSupported)
+                        return new { error = $"Unsupported serialized property type {prop.propertyType} for property '{propertyName}'. prefab_set_property writes Integer, Float, Boolean, String, Enum, Color, Vector2/3/4, Vector2Int/3Int, Quaternion, Rect, Bounds and LayerMask from 'value'; use assetReferencePath for an ObjectReference field." };
+                    return parseError != null
+                        ? new { error = $"Invalid value '{value}' for property '{propertyName}' (type: {prop.propertyType}): {parseError}" }
+                        : new { error = $"Invalid value '{value}' for property '{propertyName}' (type: {prop.propertyType}) — that property type is supported but the text could not be parsed into it." };
                 }
+                intended = SerializedPropertySkillUtility.DescribeValue(prop);
             }
             else
             {
                 return new { error = "Either 'value' or 'assetReferencePath' must be provided" };
             }
 
+            WorkflowManager.SnapshotObject(comp);
             so.ApplyModifiedProperties();
             EditorUtility.SetDirty(comp);
             AssetDatabase.SaveAssets();
 
-            return new
+            // Read back after applying: OnValidate and native setters may adjust what was written, and an
+            // object reference of the wrong type may not be stored.
+            so.Update();
+            var stored = so.FindProperty(prop.propertyPath) ?? prop;
+            string valueSet;
+            string valueRequested = null;
+            if (requestedAsset != null)
             {
-                success = true,
-                prefabPath,
-                gameObject = targetGo.name,
-                component = componentType,
-                property = propertyName,
-                valueSet = !string.IsNullOrEmpty(assetReferencePath) ? assetReferencePath : value
+                var storedAsset = stored.objectReferenceValue;
+                valueSet = storedAsset != null ? AssetDatabase.GetAssetPath(storedAsset) : "null";
+                if (storedAsset != requestedAsset)
+                    valueRequested = assetReferencePath;
+            }
+            else
+            {
+                valueSet = SerializedPropertySkillUtility.DescribeValue(stored);
+                if (!string.Equals(valueSet, intended, System.StringComparison.Ordinal))
+                    valueRequested = intended;
+            }
+
+            var response = new System.Collections.Generic.Dictionary<string, object>
+            {
+                ["success"] = true,
+                ["prefabPath"] = prefabPath,
+                ["gameObject"] = targetGo.name,
+                ["component"] = comp.GetType().Name,
+                ["property"] = stored.propertyPath,
+                ["valueSet"] = valueSet
             };
+            if (valueRequested != null)
+                response["valueRequested"] = valueRequested;
+            if (warning != null)
+                response["warnings"] = new[] { warning };
+            return response;
         }
 
         #region Prefab SerializedProperty Helpers
@@ -679,12 +767,15 @@ namespace UnitySkills
         /// "Failed to set value" message used to conflate them: false means there's no branch here
         /// at all for this <see cref="SerializedPropertyType"/> (nothing the caller writes in
         /// <c>value</c> could work); true means the type is supported but the given text couldn't
-        /// be parsed. This switch is the sole source of truth for which types are supported — only
-        /// the default branch clears this flag.</para>
+        /// be parsed, with the reason in <paramref name="error"/> when one is known. This switch is the
+        /// sole source of truth for which types are supported — only the default branch clears this flag.</para>
         /// </summary>
-        private static bool SetSerializedPropertyValue(SerializedProperty prop, string value, out bool typeSupported)
+        private static bool SetSerializedPropertyValue(SerializedProperty prop, string value, out bool typeSupported,
+            out string error, out string warning)
         {
             typeSupported = true;
+            error = null;
+            warning = null;
             switch (prop.propertyType)
             {
                 case SerializedPropertyType.Integer:
@@ -700,26 +791,19 @@ namespace UnitySkills
                     return false;
 
                 case SerializedPropertyType.Boolean:
-                    var lower = value.ToLower().Trim();
-                    prop.boolValue = lower == "true" || lower == "1" || lower == "yes" || lower == "on";
-                    return true;
+                    if (SerializedPropertySkillUtility.IsTypeDefaultText(value)) { prop.boolValue = false; return true; }
+                    if (SkillParamUtil.TryParseBoolText(value, out var boolVal)) { prop.boolValue = boolVal; return true; }
+                    error = "valid values are true, false, 1, 0, yes, no, on, off";
+                    return false;
 
                 case SerializedPropertyType.String:
                     prop.stringValue = value;
                     return true;
 
                 case SerializedPropertyType.Enum:
-                    // Try matching by name first, then fall back to matching by index
-                    if (prop.enumDisplayNames != null)
-                    {
-                        for (int i = 0; i < prop.enumDisplayNames.Length; i++)
-                        {
-                            if (string.Equals(prop.enumDisplayNames[i], value, System.StringComparison.OrdinalIgnoreCase))
-                            { prop.enumValueIndex = i; return true; }
-                        }
-                    }
-                    if (int.TryParse(value, out var enumIdx)) { prop.enumValueIndex = enumIdx; return true; }
-                    return false;
+                    // Same rules as the serialized-property writers: names, display names, "A,B" flags,
+                    // and numbers as member indexes (warned when index and value differ).
+                    return SerializedPropertySkillUtility.TrySetEnum(prop, value, out error, out warning);
 
                 case SerializedPropertyType.Color:
                     var color = ComponentSkills.ConvertValue(value, typeof(Color));

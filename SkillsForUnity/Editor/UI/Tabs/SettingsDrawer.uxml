@@ -81,6 +81,13 @@
                     </ui:VisualElement>
                     <ui:Label name="confirm-hint" class="setting-hint" style="margin-left: 0; margin-bottom: 6px;" />
 
+                    <ui:VisualElement name="dryrun-policy-row" class="setting-row setting-row--gap-top">
+                        <ui:Label name="dryrun-policy-label" class="setting-row__label" text="Require dryRun first" />
+                        <ui:DropdownField name="dryrun-policy-dropdown" class="setting-row__field" />
+                    </ui:VisualElement>
+                    <ui:Label name="dryrun-policy-hint" class="setting-hint" />
+                    <ui:Label name="dryrun-policy-explain" class="setting-hint" />
+
                     <ui:VisualElement name="perm-pending-section" class="is-hidden" style="flex-direction: column; margin-top: 4px;">
                         <ui:Label name="perm-pending-title" class="bold-label" style="font-size: 11px; margin-bottom: 4px;" />
                         <ui:VisualElement name="perm-pending-list" style="flex-direction: column;" />
@@ -109,6 +116,10 @@
                               text="AI Tools" />
                     <ui:Toggle name="agent-autosync-toggle" class="setting-toggle" />
                     <ui:Label name="agent-autosync-hint" class="setting-hint"
+                              style="margin-left: 18px;" />
+                    <ui:Toggle name="agent-instruction-toggle" class="setting-toggle"
+                               style="margin-top: 6px;" />
+                    <ui:Label name="agent-instruction-hint" class="setting-hint"
                               style="margin-left: 18px;" />
                 </ui:VisualElement>
 
@@ -159,11 +170,9 @@
                         <ui:DropdownField name="loglevel-dropdown" class="setting-row__field" />
                     </ui:VisualElement>
 
-                    <ui:VisualElement name="update-notifications-row" class="setting-row">
+                    <ui:VisualElement name="update-notifications-row" class="setting-row" style="flex-direction: row; align-items: center; justify-content: space-between;">
                         <ui:Label name="update-notifications-label" class="setting-row__label" />
-                        <ui:VisualElement name="update-notifications-switch" class="server-switch" style="margin: 0;">
-                            <ui:VisualElement class="server-switch__knob" />
-                        </ui:VisualElement>
+                        <ui:Toggle name="update-notifications-toggle" class="setting-toggle" />
                     </ui:VisualElement>
                     <ui:Label name="update-notifications-hint" class="setting-hint" />
 
@@ -171,13 +180,12 @@
                         <ui:Label name="update-check-label" class="setting-row__label" />
                         <ui:Button name="update-check-btn" class="mini-btn" />
                     </ui:VisualElement>
+                    <ui:Label name="update-mode-hint" class="setting-hint is-hidden" />
                     <ui:Label name="update-check-status" class="setting-hint" />
 
-                    <ui:VisualElement name="telemetry-row" class="setting-row">
+                    <ui:VisualElement name="telemetry-row" class="setting-row" style="flex-direction: row; align-items: center; justify-content: space-between;">
                         <ui:Label name="telemetry-label" class="setting-row__label" />
-                        <ui:VisualElement name="telemetry-switch" class="server-switch" style="margin: 0;">
-                            <ui:VisualElement class="server-switch__knob" />
-                        </ui:VisualElement>
+                        <ui:Toggle name="telemetry-toggle" class="setting-toggle" />
                     </ui:VisualElement>
                     <ui:Label name="telemetry-hint" class="setting-hint" />
 

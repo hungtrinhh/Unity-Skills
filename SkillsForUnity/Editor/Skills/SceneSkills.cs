@@ -1,4 +1,4 @@
-using UnityEngine;
+﻿using UnityEngine;
 using UnityEditor;
 using UnityEditor.SceneManagement;
 using UnityEngine.SceneManagement;
@@ -14,10 +14,13 @@ namespace UnitySkills
     /// </summary>
     public static class SceneSkills
     {
+        private const string SceneNameNote = "Bare scene name, no '.unity' extension or folder path -- appending either breaks the match against loaded scenes.";
+
         [UnitySkill("scene_create", "Create a new empty scene",
             Category = SkillCategory.Scene, Operation = SkillOperation.Create,
             Tags = new[] { "new", "empty", "setup" },
             Outputs = new[] { "scenePath", "sceneName" },
+            RequiredParams = new[] { "scenePath" },
             TracksWorkflow = true,
             MutatesScene = true, MutatesAssets = true, RiskLevel = "high")]
         public static object SceneCreate(string scenePath)
@@ -30,7 +33,8 @@ namespace UnitySkills
                 Directory.CreateDirectory(dir);
 
             var scene = EditorSceneManager.NewScene(NewSceneSetup.EmptyScene, NewSceneMode.Single);
-            EditorSceneManager.SaveScene(scene, scenePath);
+            if (!EditorSceneManager.SaveScene(scene, scenePath))
+                return SaveFailedError(scenePath, "scenePath");
             AssetDatabase.Refresh();
 
             // SaveScene has already written the new .unity to disk; record it as Created, so on undo moving it into the storage area is equivalent to deleting it
@@ -47,7 +51,9 @@ namespace UnitySkills
             Outputs = new[] { "sceneName", "scenePath" },
             RequiresInput = new[] { "scenePath" },
             MutatesScene = true, RiskLevel = "high")]
-        public static object SceneLoad(string scenePath, bool additive = false)
+        public static object SceneLoad(string scenePath,
+            [SkillParam("true = OpenSceneMode.Additive, keeps other loaded scenes open; false = Single, closes them first.")]
+            bool additive = false)
         {
             if (!File.Exists(scenePath))
                 return new { error = $"Scene not found: {scenePath}" };
@@ -64,7 +70,9 @@ namespace UnitySkills
             Outputs = new[] { "scenePath" },
             TracksWorkflow = true,
             MutatesAssets = true, RiskLevel = "high")]
-        public static object SceneSave(string scenePath = null)
+        public static object SceneSave(
+            [SkillParam("Omit to overwrite the active scene's own file; a different path re-associates the active scene with that file (Save As), not a copy.")]
+            string scenePath = null)
         {
             if (!string.IsNullOrEmpty(scenePath) && Validate.SafePath(scenePath, "scenePath") is object pathErr) return pathErr;
 
@@ -85,7 +93,8 @@ namespace UnitySkills
                 if (oldAsset != null) WorkflowManager.SnapshotObject(oldAsset);
             }
 
-            EditorSceneManager.SaveScene(scene, path);
+            if (!EditorSceneManager.SaveScene(scene, path))
+                return SaveFailedError(path, "scenePath");
 
             if (!existedBefore)
             {
@@ -196,7 +205,9 @@ namespace UnitySkills
             Category = SkillCategory.Scene, Operation = SkillOperation.Execute,
             Tags = new[] { "screenshot", "capture", "image", "gameview", "playmode" },
             Outputs = new[] { "path", "width", "height", "isPlaying", "note", "imageBase64", "imageWidth", "imageHeight", "imageBytes" })]
-        public static object SceneScreenshot(string filename = "screenshot.png", int width = 1920, int height = 1080, bool returnImage = false, int maxDimension = 1280)
+        public static object SceneScreenshot(string filename = "screenshot.png", int width = 1920, int height = 1080, bool returnImage = false,
+            [SkillParam("Caps the longest side of the returnImage base64 PNG (clamped 256-4096); the file written to disk is unaffected.")]
+            int maxDimension = 1280)
         {
             // Strip all path components, to prevent writing outside Screenshots/
             filename = Path.GetFileName(filename);
@@ -296,7 +307,7 @@ namespace UnitySkills
             Tags = new[] { "unload", "close", "multi-scene" },
             Outputs = new[] { "unloaded" },
             RequiresInput = new[] { "sceneName" })]
-        public static object SceneUnload(string sceneName)
+        public static object SceneUnload([SkillParam(SceneNameNote)] string sceneName)
         {
             Scene sceneToUnload = default;
             for (int i = 0; i < SceneManager.sceneCount; i++)
@@ -315,12 +326,12 @@ namespace UnitySkills
             if (SceneManager.sceneCount <= 1)
                 return new { success = false, error = "Cannot unload the only loaded scene" };
 
-            if (sceneToUnload.isDirty)
-            {
-                EditorSceneManager.SaveScene(sceneToUnload);
-            }
+            // Closing a dirty scene whose save failed would silently drop its unsaved edits.
+            if (sceneToUnload.isDirty && !EditorSceneManager.SaveScene(sceneToUnload))
+                return SaveFailedError(sceneToUnload.path, "sceneName");
 
-            EditorSceneManager.CloseScene(sceneToUnload, true);
+            if (!EditorSceneManager.CloseScene(sceneToUnload, true))
+                return new { success = false, error = $"Unity refused to close scene '{sceneName}'." };
             return new { success = true, unloaded = sceneName };
         }
 
@@ -329,7 +340,7 @@ namespace UnitySkills
             Tags = new[] { "active", "focus", "multi-scene" },
             Outputs = new[] { "activeScene" },
             RequiresInput = new[] { "sceneName" })]
-        public static object SceneSetActive(string sceneName)
+        public static object SceneSetActive([SkillParam(SceneNameNote)] string sceneName)
         {
             for (int i = 0; i < SceneManager.sceneCount; i++)
             {
@@ -339,7 +350,8 @@ namespace UnitySkills
                     if (!scene.isLoaded)
                         return new { success = false, error = $"Scene '{sceneName}' is not loaded" };
 
-                    SceneManager.SetActiveScene(scene);
+                    if (!SceneManager.SetActiveScene(scene))
+                        return new { success = false, error = $"Unity refused to make scene '{sceneName}' active." };
                     return new { success = true, activeScene = scene.name };
                 }
             }
@@ -351,14 +363,20 @@ namespace UnitySkills
             Outputs = new[] { "count", "objects", "instanceId", "path" },
             ReadOnly = true,
             Mode = SkillMode.SemiAuto)]
-        public static object SceneFindObjects(string namePattern = null, string tag = null, string componentType = null, int limit = 50)
+        public static object SceneFindObjects(
+            [SkillParam("Case-insensitive substring match, not a wildcard or regex pattern (for regex use gameobject_find).")]
+            string namePattern = null,
+            string tag = null, string componentType = null, int limit = 50)
         {
             IEnumerable<GameObject> objects = GameObjectFinder.GetSceneObjects();
 
+            // An undefined tag makes CompareTag log an error and match nothing (the old try/catch around the lazy Where
+            // never saw it), so it read as "no object has this tag"; check up front.
             if (!string.IsNullOrEmpty(tag))
             {
-                try { objects = objects.Where(go => go.CompareTag(tag)); }
-                catch { return new { error = $"Invalid tag: {tag}" }; }
+                if (!SkillsCommon.IsTagDefined(tag))
+                    return SkillParamUtil.InvalidValueError(tag, "tag", UnityEditorInternal.InternalEditorUtility.tags);
+                objects = objects.Where(go => go.CompareTag(tag));
             }
 
             if (!string.IsNullOrEmpty(namePattern))
@@ -367,7 +385,7 @@ namespace UnitySkills
             if (!string.IsNullOrEmpty(componentType))
             {
                 var type = ComponentSkills.FindComponentType(componentType);
-                if (type == null) return new { error = $"Component type not found: {componentType}" };
+                if (type == null) return ComponentSkills.UnknownComponentTypeError(componentType, "componentType");
                 objects = objects.Where(go => go.GetComponent(type) != null);
             }
 
@@ -378,6 +396,15 @@ namespace UnitySkills
 
             return new { success = true, count = results.Length, objects = results };
         }
+
+        // SaveScene reports failure (read-only or locked file or folder) only through its bool; ignoring it
+        // answered success for a scene that was never written.
+        private static object SaveFailedError(string path, string parameter) => new
+        {
+            success = false,
+            error = $"Unity could not save the scene to '{path}' (read-only or locked file or folder?); the Console has the reason.",
+            parameter,
+        };
     }
 }
 

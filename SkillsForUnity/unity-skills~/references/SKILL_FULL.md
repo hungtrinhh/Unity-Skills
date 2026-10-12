@@ -1,4 +1,4 @@
-> This is the complete reference manual archive. The daily entry point is the root `SKILL.md`, which is authoritative wherever the two disagree — in particular for the payload contract (`GET /skills/meta`, brief-by-default `GET /skills`, `?wire=v2`) and for `surfaceProfile` / `SURFACE_EXCLUDED`.
+> This is the complete reference manual archive. The daily entry point is the root `SKILL.md` with the `protocol-*.md` files beside this one; they are authoritative wherever this archive disagrees — in particular for discovery and the payload contract (`protocol-discovery.md`: `GET /skills/meta`, brief-by-default `GET /skills`, `?wire=v2`), `surfaceProfile` / `SURFACE_EXCLUDED`, the expected instance (`expectProject` / `expectInstance`), and when a dryRun is still required.
 
 # Unity Skills
 
@@ -8,7 +8,7 @@ Use this skill when the user wants to automate the Unity Editor through the loca
 
 Before the first skill call in a session:
 
-1. **`GET /health`** — discover the server (ports `8090`–`8100`) and read `currentMode` (`"approval"` / `"auto"` / `"bypass"`), `panelApprovalRequired`, and `pendingCount`.
+1. **`GET /health`** — discover the server (ports `8090`–`8100`) and read `currentMode` (`"approval"` / `"auto"` / `"bypass"`), `panelApprovalRequired`, and `pendingCount`. Confirm `projectName` is the project you are editing — see "Which Editor answered?" under Boot Handshake below.
 2. **Branch on `currentMode`**: under `approval`, the first write call to any `FullAuto` skill returns `MODE_RESTRICTED` and you must run the grant protocol before it executes; under `auto`/`bypass`, writes execute directly (self-assess risk under `auto`). Full protocol and mode table: see "Operating Mode" → "Boot Handshake" below.
 3. Only then proceed to skill discovery (below) and calls.
 
@@ -32,7 +32,7 @@ Python helper shortcuts — **these are `unity_skills.py` functions, not skill n
 **Multi-skill execution — `POST /skills/batch` (v2.1.0+).** Execute a sequence in **one** HTTP call instead of N: body `{"steps":[{"skill":"<name>","args":{...}}, ...], "continueOnError":false}` (≤50 steps). Each step runs the full single-skill pipeline (validation, permission gate, undo, audit). Default is fail-fast — on a step error the rest are returned as `skipped`; `continueOnError: true` skips failed steps instead. Authorization responses (`MODE_RESTRICTED` / `CONFIRMATION_REQUIRED`) always interrupt regardless and carry the grant token in that step's error. Response: `{status, executed, failed, results:[{index, skill, status, result|error}]}`. `?mode=dryRun` validates every step in one shot without executing (never interrupts) — the batch counterpart of the dryRun gate. Python: `unity_skills.execute_batch(steps, dry_run=True)` / `execute_batch(steps, mode="transactional", diff=True)`.
 
 - **Inter-step references (`$ref`)** — a later step can now consume an earlier step's output. Anywhere in `args`, at any depth, an object whose **only** key is `$ref` — `{"$ref":"$N.path"}` — is replaced by `SelectToken(path)` on step `N`'s (0-based) unwrapped result: e.g. `{"instanceId":{"$ref":"$0.instanceId"}}` feeds the `instanceId` created by step 0 into a later step. A ref that fails to resolve fails that step with `SEMANTIC_INVALID`. Under `?mode=dryRun` refs are structurally validated (reported in `refsValidated` with `structural:true`) since the target value does not exist yet — treat any semantic mismatch there as a warning, not a hard failure. This lifts the old "later step cannot reference an earlier step's output" boundary; step-by-step calls are no longer required just to thread returned ids.
-- **Transactional mode (`?mode=transactional`)** — all-or-nothing. If any step fails (including an authorization interrupt), every already-executed step is rolled back via Unity Undo and the response returns top-level `status:"rolled_back"`, `rolledBack:true`, with executed steps marked `rolled_back`. Pre-check **rejects (`400`)** a batch that combines `continueOnError` with any step that `MayTriggerReload`. Steps that mutate assets are flagged `rollbackReliability:"partial"` — Undo cannot fully revert on-disk asset writes.
+- **Transactional mode (`?mode=transactional`)** — all-or-nothing. If any step fails (including an authorization interrupt), every already-executed step is rolled back via Unity Undo and the response returns top-level `status:"rolled_back"`, `rolledBack:true`, with executed steps marked `rolled_back`. Pre-check **rejects (`400`)**, before anything runs, a batch that meets any one of these on its own: `continueOnError:true`, a step with no `skill` or an unknown one, or a step whose skill declares `MayTriggerReload`. Steps that mutate assets are flagged `rollbackReliability:"partial"` — Undo cannot fully revert on-disk asset writes.
 
 Use module `SKILL.md` files for routing guidance, guardrails, and minimal examples, not as the canonical source of exact signatures.
 
@@ -60,9 +60,17 @@ On session start (or before the first skill call), call `GET /health` and read:
 - `mainThreadIdleMs` — milliseconds since Unity's main thread last ran the request loop. `/health` is answered off the main thread, so a fast reply with a **large** `mainThreadIdleMs` means *"the server is alive but Unity is busy"* (a long skill, an import, or a modal dialog) — not *"the server is down"*. Single/double digits is a healthy idle editor; seconds means keep waiting rather than restart. `-1` means the loop has not ticked yet. Add `?live=1` to force the request through the main-thread queue when you need strictly live values instead of a snapshot up to ~1s old.
 - `workflowRecoveryMode` — `true` when workflow history failed to load this session: rollback data is degraded and file-store cleanup is suspended until the history is cleared.
 
+#### Which Editor answered? (multi-instance)
+
+Several Unity projects can run UnitySkills at once; each server takes the first free port in `8090`–`8100` in **launch order**, so a port number is not a project identity. Before the first skill call, read `projectName` / `instanceId` from `/health` and confirm they name the project the user is working on. Every response also carries `X-Unity-Instance` and `X-Unity-Project` headers, so a bare `curl` can check the same thing without a separate `/health` call.
+
+- **Python client** — auto-discovery prefers the registry entry whose `path` contains the current working directory, then other live entries by freshest heartbeat, then a port scan. It only silently falls back to *another* project when the cwd is not inside any registered project. `python unity_skills.py --list-instances` prints every live entry (`name`, `path`, `port`, `unityVersion`); pin the choice with `--port <n>` (or `--version "6"` / `"2022"`) whenever more than one instance is live or the cwd is outside the project.
+- **Bare HTTP** — read `~/.unity_skills/registry.json` (or call `/health` on each port) to pick the port; never assume `8090`. Re-check after the Editor restarts: the port can change.
+- **Mismatch** — stop, tell the user which project answered, and switch the port. Do not "fix" the wrong project.
+
 ### Three Modes (aligned with Claude Code permission modes)
 
-> **Factory default:** a fresh install starts in **Auto**; an upgraded install (any pre-existing `UnitySkills_*` pref) starts in **Bypass**. It **never** defaults to Approval. The "Claude Code 类比" column below is only a mental model, **not** the factory default — always read `/health.currentMode` before acting.
+> **Factory default:** a fresh install starts in **Auto**; an upgraded install (any pre-existing `UnitySkills_*` pref) starts in **Bypass**. It **never** defaults to Approval. The "Claude Code 类比" column below is only a mental model, **not** the factory default — never assume the mode: take `currentMode` from the session-start `/health` probe and re-probe after a failure.
 
 | Mode | Claude Code 类比（心智对照，非默认） | FullAuto skill | Auto-detected NeverInSemi skill |
 |---|---|---|---|

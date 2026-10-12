@@ -225,17 +225,8 @@ namespace UnitySkills.Tests.Core
                 ["workflow_snapshot_created"] = "same as workflow_snapshot_object",
             };
 
-            var markers = new[]
-            {
-                "Undo.Register", "Undo.RecordObject", "Undo.AddComponent", "Undo.DestroyObject",
-                "Undo.SetTransformParent", "WorkflowManager.Snapshot", "EditorSceneManager.MarkSceneDirty",
-                "EditorUtility.SetDirty", "AssetDatabase.CreateAsset", "AssetDatabase.SaveAssets",
-                "WriteImportSettingsIfDirty", "File.WriteAllText", "PrefabUtility.SaveAsPrefabAsset",
-                ".SaveAndReimport",
-            };
-
             var root = GetSkillsSourceRoot();
-            Assume.That(Directory.Exists(root), Is.True, $"Skill source directory not found: {root}");
+            Assert.That(Directory.Exists(root), Is.True, $"Skill source directory not found: {root}");
 
             var maskedByType = new Dictionary<string, string>(StringComparer.Ordinal);
             string GetMasked(string typeName)
@@ -273,7 +264,7 @@ namespace UnitySkills.Tests.Core
 
                 checkedCount++;
 
-                var hit = markers.FirstOrDefault(marker => bodies.Any(body => body.IndexOf(marker, StringComparison.Ordinal) >= 0));
+                var hit = FirstWriteMarker(bodies);
                 if (hit != null)
                 {
                     issues.Add($"{skill.Name} ({declaringType.Name}.{skill.Method.Name}): body contains '{hit}' " +
@@ -292,6 +283,54 @@ namespace UnitySkills.Tests.Core
 
             Assert.That(issues, Is.Empty,
                 $"{issues.Count} skill(s) write to the scene or an asset without declaring it:\n" + string.Join("\n", issues));
+        }
+
+        /// <summary>Calls that write scene or asset state; a body containing one must declare MutatesScene or MutatesAssets.</summary>
+        private static readonly string[] WriteMarkers =
+        {
+            "Undo.Register", "Undo.RecordObject", "Undo.AddComponent", "Undo.DestroyObject",
+            "Undo.SetTransformParent", "WorkflowManager.Snapshot", "EditorSceneManager.MarkSceneDirty",
+            "EditorUtility.SetDirty", "AssetDatabase.CreateAsset", "AssetDatabase.SaveAssets",
+            "WriteImportSettingsIfDirty", "File.WriteAllText", "PrefabUtility.SaveAsPrefabAsset",
+            ".SaveAndReimport",
+        };
+
+        private static string FirstWriteMarker(IEnumerable<string> maskedBodies)
+        {
+            var bodies = maskedBodies.ToList();
+            return WriteMarkers.FirstOrDefault(marker => bodies.Any(body => body.IndexOf(marker, StringComparison.Ordinal) >= 0));
+        }
+
+        /// <summary>
+        /// The canary for <see cref="SkillsRecordingUndoOrSnapshots_DeclareMutatesSceneOrAssets"/>: a real write call is
+        /// found, while the same text inside a comment or a string literal is not.
+        /// </summary>
+        [Test]
+        public void WriteMarkerScan_SeesCallsButNotCommentsOrStrings()
+        {
+            const string source =
+                "public static class CanarySkills\n" +
+                "{\n" +
+                "    public static object CanaryWrite(GameObject go)\n" +
+                "    {\n" +
+                "        // Undo.Register would be a marker, but this is a comment\n" +
+                "        var label = \"EditorUtility.SetDirty\";\n" +
+                "        Undo.RecordObject(go, label);\n" +
+                "        return null;\n" +
+                "    }\n" +
+                "\n" +
+                "    public static object CanaryRead(GameObject go)\n" +
+                "    {\n" +
+                "        /* AssetDatabase.SaveAssets(); */\n" +
+                "        return new { name = \"File.WriteAllText\" };\n" +
+                "    }\n" +
+                "}\n";
+            var masked = SourceMask.Mask(source);
+
+            Assert.That(FirstWriteMarker(SourceMask.FindMethodBodies(masked, "CanaryWrite")), Is.EqualTo("Undo.RecordObject"));
+            Assert.That(FirstWriteMarker(SourceMask.FindMethodBodies(masked, "CanaryRead")), Is.Null,
+                "Marker text inside comments and string literals must not count as a write.");
+            Assert.That(SourceMask.FindMethodBodies(masked, "CanaryRead"), Has.Count.EqualTo(1), "The body must be found at all.");
         }
 
         /// <summary>
@@ -444,10 +483,21 @@ namespace UnitySkills.Tests.Core
         /// yet rejects <c>materialPath</c> as an unknown parameter — and that name does exist on
         /// <c>material_assign</c> in the same module, so an agent generalizes it over and gets rejected for
         /// correctly reading the metadata.</para>
+        ///
+        /// <para>Also asserts the whole compound string is itself a <c>_requiredInputGroups</c> key. Every part
+        /// naming a real parameter is necessary but not sufficient: <see cref="SkillRouter"/>'s
+        /// <c>IsParameterRequired</c> only ever compares a token to a parameter name by exact string equality, so
+        /// it never matches a piped token; the *only* mechanism that can enforce a compound token is
+        /// <see cref="SkillPlanningService"/>'s <c>ApplyRequiredInputGroups</c> looking the whole string up as a
+        /// dictionary key. A token whose halves are individually valid but whose full string was never registered
+        /// (<c>model_get_mesh_info</c>'s <c>"gameObject|assetPath"</c>) used to pass this test outright while
+        /// enforcing nothing - an empty body dry-ran as valid and failed only once
+        /// <c>GameObjectFinder.FindOrError</c> ran during execution.</para>
         /// </summary>
         [Test]
         public void CompoundRequiredInputTokens_NameAKeyTheSkillAccepts()
         {
+            var groups = RequiredInputGroups();
             var offenders = new List<string>();
 
             foreach (var skill in SkillRouter.GetAllSkillsSnapshotUnfiltered()
@@ -469,6 +519,10 @@ namespace UnitySkills.Tests.Core
                         if (!SkillAcceptsParameter(skill, part))
                             offenders.Add($"{skill.Name}: token '{token}' names '{part}', which it does not accept");
                     }
+
+                    if (!groups.ContainsKey(token))
+                        offenders.Add($"{skill.Name}: compound token '{token}' is not a _requiredInputGroups key, " +
+                                      "so ApplyRequiredInputGroups never enforces it");
                 }
             }
 

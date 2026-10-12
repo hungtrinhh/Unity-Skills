@@ -11,97 +11,19 @@ namespace UnitySkills
     /// </summary>
     public static class LightSkills
     {
-        [UnitySkill("light_create", "Create a new light (Directional, Point, Spot, Area)",
-            Category = SkillCategory.Light, Operation = SkillOperation.Create,
-            Tags = new[] { "light", "create", "illumination", "scene" },
-            Outputs = new[] { "name", "instanceId", "lightType", "intensity", "shadows" },
-            TracksWorkflow = true, MutatesScene = true)]
-        public static object LightCreate(
-            string name = "New Light",
-            string lightType = "Point",
-            float x = 0, float y = 3, float z = 0,
-            float r = 1, float g = 1, float b = 1,
-            float intensity = 1,
-            float range = 10,
-            float spotAngle = 30,
-            string shadows = "Soft")
+        private const string ShadowsNote = "None, Hard or Soft (case-insensitive).";
+
+        /// <summary>
+        /// Applies the optional light properties shared by light_set_properties and its batch sibling
+        /// (bugs.md B5, H9), so both use the same "parse first, then write" order and the same
+        /// applied/skipped bookkeeping. Colour channels are one unit: if any of r/g/b/a is given, the
+        /// others default to the light's current value, and each supplied channel is added to
+        /// <paramref name="applied"/> by its own name (r/g/b/a), never the aggregate "color".
+        /// </summary>
+        private static void ApplyLightProperties(Light light, float? r, float? g, float? b, float? a,
+            float? intensity, float? range, float? spotAngle, LightShadows? shadows,
+            List<string> applied, List<string> skipped)
         {
-            // Both enums are validated before the GameObject is created, so an invalid value never
-            // leaves behind a half-configured light (a switch fallback would let an invalid shadows
-            // value silently fall through to None).
-            if (!SkillParamUtil.TryParseRequiredEnum<LightType>(lightType, "lightType", out var lt, out var typeError))
-                return typeError;
-            if (!SkillParamUtil.TryParseRequiredEnum<LightShadows>(shadows, "shadows", out var shadowMode, out var shadowsError))
-                return shadowsError;
-
-            var go = new GameObject(name);
-            var light = go.AddComponent<Light>();
-            light.type = lt;
-
-            go.transform.position = new Vector3(x, y, z);
-
-            light.color = new Color(r, g, b);
-            light.intensity = intensity;
-
-            if (lt == LightType.Point || lt == LightType.Spot)
-                light.range = range;
-
-            if (lt == LightType.Spot)
-                light.spotAngle = spotAngle;
-
-            light.shadows = shadowMode;
-
-            Undo.RegisterCreatedObjectUndo(go, "Create Light");
-            WorkflowManager.SnapshotObject(go, SnapshotType.Created);
-
-            return new
-            {
-                success = true,
-                name = go.name,
-                entityId = UnityObjectIdUtility.GetEntityId(go),
-                instanceId = UnityObjectIdUtility.GetObjectId(go),
-                lightType = light.type.ToString(),
-                position = new { x, y, z },
-                color = new { r, g, b },
-                intensity,
-                shadows = light.shadows.ToString()
-            };
-        }
-
-        [UnitySkill("light_set_properties", "Set light properties (supports name/instanceId/path). Colour takes r/g/b/a, each defaulting to the light's current channel. Rejects the whole call if shadows is not a valid value; the response lists which parameters were 'applied' and which were 'skipped' because the light type does not carry them (range needs Point/Spot, spotAngle needs Spot).",
-            Category = SkillCategory.Light, Operation = SkillOperation.Modify,
-            Tags = new[] { "light", "color", "intensity", "shadow" },
-            Outputs = new[] { "lightType", "color", "intensity", "range", "spotAngle", "shadows", "applied", "skipped" },
-            RequiresInput = new[] { "gameObject" },
-            TracksWorkflow = true, MutatesScene = true)]
-        public static object LightSetProperties(
-            string name = null, int instanceId = 0, string path = null,
-            float? r = null, float? g = null, float? b = null, float? a = null,
-            float? intensity = null,
-            float? range = null,
-            float? spotAngle = null,
-            string shadows = null)
-        {
-            var (go, error) = GameObjectFinder.FindOrError(name, instanceId, path);
-            if (error != null) return error;
-
-            var light = go.GetComponent<Light>();
-            if (light == null)
-                return new { error = $"No Light component on {go.name}" };
-
-            // All validation must complete before the first write. Writing color/intensity/range
-            // and then checking shadows would mean an invalid value returns a { warning } object —
-            // the router treats that as neither success nor failure, so the caller gets no payload
-            // at all even though those earlier fields have already been written.
-            if (!SkillParamUtil.TryParseOptionalEnum<LightShadows>(shadows, "shadows", out var shadowMode, out var shadowsError))
-                return shadowsError;
-
-            WorkflowManager.SnapshotObject(light);
-            Undo.RecordObject(light, "Set Light Properties");
-
-            var applied = new List<string>();
-            var skipped = new List<string>();
-
             if (r.HasValue || g.HasValue || b.HasValue || a.HasValue)
             {
                 var currentColor = light.color;
@@ -111,8 +33,6 @@ namespace UnitySkills
                     b ?? currentColor.b,
                     a ?? currentColor.a
                 );
-                // applied's contract is "the parameter names that actually took effect", so list per-channel.
-                // "color" is not a parameter of this skill; reporting it would mismatch what the caller sent.
                 if (r.HasValue) applied.Add("r");
                 if (g.HasValue) applied.Add("g");
                 if (b.HasValue) applied.Add("b");
@@ -151,11 +71,117 @@ namespace UnitySkills
                 }
             }
 
-            if (shadowMode.HasValue)
+            if (shadows.HasValue)
             {
-                light.shadows = shadowMode.Value;
+                light.shadows = shadows.Value;
                 applied.Add("shadows");
             }
+        }
+
+        [UnitySkill("light_create", "Create a new light (Directional, Point, Spot, Area)",
+            Category = SkillCategory.Light, Operation = SkillOperation.Create,
+            Tags = new[] { "light", "create", "illumination", "scene" },
+            Outputs = new[] { "name", "instanceId", "lightType", "intensity", "shadows" },
+            TracksWorkflow = true, MutatesScene = true)]
+        public static object LightCreate(
+            string name = "New Light",
+            [SkillParam("Directional, Point, Spot, Area (= Rectangle) or Disc, case-insensitive.")]
+            string lightType = "Point",
+            [SkillParam("x/y/z: world position; the light is created at the scene root.")]
+            float x = 0, float y = 3, float z = 0,
+            [SkillParam("r/g/b: colour channels as 0-1 floats (not 0-255).")]
+            float r = 1, float g = 1, float b = 1,
+            float intensity = 1,
+            [SkillParam("Distance in world units; Point and Spot only, ignored for other types.")]
+            float range = 10,
+            [SkillParam("Cone angle in degrees; Spot only, ignored for other types.")]
+            float spotAngle = 30,
+            [SkillParam(ShadowsNote)] string shadows = "Soft")
+        {
+            // Both enums are validated before the GameObject is created, so an invalid value never
+            // leaves behind a half-configured light (a switch fallback would let an invalid shadows
+            // value silently fall through to None).
+            if (!SkillParamUtil.TryParseRequiredEnum<LightType>(lightType, "lightType", out var lt, out var typeError))
+                return typeError;
+            if (!SkillParamUtil.TryParseRequiredEnum<LightShadows>(shadows, "shadows", out var shadowMode, out var shadowsError))
+                return shadowsError;
+
+            var go = new GameObject(name);
+            var light = go.AddComponent<Light>();
+            light.type = lt;
+
+            go.transform.position = new Vector3(x, y, z);
+
+            light.color = new Color(r, g, b);
+            light.intensity = intensity;
+
+            if (lt == LightType.Point || lt == LightType.Spot)
+                light.range = range;
+
+            if (lt == LightType.Spot)
+                light.spotAngle = spotAngle;
+
+            light.shadows = shadowMode;
+
+            Undo.RegisterCreatedObjectUndo(go, "Create Light");
+            WorkflowManager.SnapshotObject(go, SnapshotType.Created);
+
+            // Read back from the created light, so the response shows what Unity stored rather than the request.
+            var position = go.transform.position;
+            return new
+            {
+                success = true,
+                name = go.name,
+                entityId = UnityObjectIdUtility.GetEntityId(go),
+                instanceId = UnityObjectIdUtility.GetObjectId(go),
+                lightType = light.type.ToString(),
+                position = new { x = position.x, y = position.y, z = position.z },
+                color = new { r = light.color.r, g = light.color.g, b = light.color.b },
+                intensity = light.intensity,
+                range = light.range,
+                spotAngle = light.spotAngle,
+                shadows = light.shadows.ToString()
+            };
+        }
+
+        [UnitySkill("light_set_properties", "Set light properties (supports name/instanceId/path). Colour takes r/g/b/a, each defaulting to the light's current channel. Rejects the whole call if shadows is not a valid value; the response lists which parameters were 'applied' and which were 'skipped' because the light type does not carry them (range needs Point/Spot, spotAngle needs Spot).",
+            Category = SkillCategory.Light, Operation = SkillOperation.Modify,
+            Tags = new[] { "light", "color", "intensity", "shadow" },
+            Outputs = new[] { "lightType", "color", "intensity", "range", "spotAngle", "shadows", "applied", "skipped" },
+            RequiresInput = new[] { "gameObject" },
+            TracksWorkflow = true, MutatesScene = true)]
+        public static object LightSetProperties(
+            string name = null, int instanceId = 0, string path = null,
+            [SkillParam("r/g/b/a: 0-1 floats; each omitted channel keeps the light's current value.")]
+            float? r = null, float? g = null, float? b = null, float? a = null,
+            [SkillParam("Light.intensity as-is (it multiplies the colour), no unit conversion; omitted = unchanged.")]
+            float? intensity = null,
+            [SkillParam("Distance in world units; Point and Spot only, otherwise reported in skipped.")]
+            float? range = null,
+            [SkillParam("Cone angle in degrees; Spot only, otherwise reported in skipped.")]
+            float? spotAngle = null,
+            [SkillParam(ShadowsNote)] string shadows = null)
+        {
+            var (go, error) = GameObjectFinder.FindOrError(name, instanceId, path);
+            if (error != null) return error;
+
+            var light = go.GetComponent<Light>();
+            if (light == null)
+                return new { error = $"No Light component on {go.name}" };
+
+            // All validation must complete before the first write. Writing color/intensity/range
+            // and then checking shadows would mean an invalid value returns a { warning } object —
+            // the router treats that as neither success nor failure, so the caller gets no payload
+            // at all even though those earlier fields have already been written.
+            if (!SkillParamUtil.TryParseOptionalEnum<LightShadows>(shadows, "shadows", out var shadowMode, out var shadowsError))
+                return shadowsError;
+
+            WorkflowManager.SnapshotObject(light);
+            Undo.RecordObject(light, "Set Light Properties");
+
+            var applied = new List<string>();
+            var skipped = new List<string>();
+            ApplyLightProperties(light, r, g, b, a, intensity, range, spotAngle, shadowMode, applied, skipped);
 
             return new
             {
@@ -280,7 +306,7 @@ namespace UnitySkills
             Undo.RecordObject(light, "Set Light Enabled");
             light.enabled = enabled;
 
-            return new { success = true, name = go.name, enabled };
+            return new { success = true, name = go.name, enabled = light.enabled };
         }
 
         [UnitySkill("light_set_enabled_batch", "Enable/disable multiple lights in one call (Efficient). items: JSON array of {name, instanceId, path, enabled}",
@@ -289,7 +315,9 @@ namespace UnitySkills
             Outputs = new[] { "totalItems", "successCount", "failCount", "results" },
             RequiresInput = new[] { "items" },
             TracksWorkflow = true, MutatesScene = true)]
-        public static object LightSetEnabledBatch(string items)
+        public static object LightSetEnabledBatch(
+            [SkillParam("JSON array of {name|path|instanceId, enabled (required: true or false)}.")]
+            string items)
         {
             return BatchExecutor.Execute<BatchLightEnabledItem>(items, item =>
             {
@@ -299,11 +327,26 @@ namespace UnitySkills
                 var light = go.GetComponent<Light>();
                 if (light == null) return new { error = "No Light component", target = go.name };
 
+                if (!item.enabled.HasValue)
+                {
+                    return new
+                    {
+                        error = "enabled is required for each item (true or false); an omitted value is not guessed, because light_set_enabled defaults to true while this batch used to default to false.",
+                        errorCode = "MISSING_PARAM",
+                        retryStrategy = SkillErrorResponse.RetryFixAndRetry,
+                        parameter = "enabled",
+                        target = go.name,
+                        suggestedFixes = new object[] {
+                            new { action = "fix_param", args = new { enabled = false }, reason = "Pass enabled:false to switch the light off, enabled:true to switch it on." }
+                        },
+                    };
+                }
+
                 WorkflowManager.SnapshotObject(light);
                 Undo.RecordObject(light, "Batch Set Light Enabled");
-                light.enabled = item.enabled;
-                return new { target = go.name, success = true, enabled = item.enabled };
-            }, item => item.name ?? item.path ?? item.instanceId.ToString());
+                light.enabled = item.enabled.Value;
+                return new { target = go.name, success = true, enabled = light.enabled };
+            }, item => item.name ?? item.path ?? item.instanceId.ToString(), atomic: true);
         }
 
         private class BatchLightEnabledItem
@@ -311,16 +354,18 @@ namespace UnitySkills
             public string name { get; set; }
             public int instanceId { get; set; }
             public string path { get; set; }
-            public bool enabled { get; set; }
+            public bool? enabled { get; set; }
         }
 
-        [UnitySkill("light_set_properties_batch", "Set properties for multiple lights in one call (Efficient). items: JSON array of {name, instanceId, r, g, b, a, intensity, range, shadows}",
+        [UnitySkill("light_set_properties_batch", "Set properties for multiple lights in one call (Efficient). items: JSON array of {name, instanceId, r, g, b, a, intensity, range, spotAngle, shadows}",
             Category = SkillCategory.Light, Operation = SkillOperation.Modify,
             Tags = new[] { "light", "batch", "properties", "color" },
             Outputs = new[] { "totalItems", "successCount", "failCount", "results" },
             RequiresInput = new[] { "items" },
             TracksWorkflow = true, MutatesScene = true)]
-        public static object LightSetPropertiesBatch(string items)
+        public static object LightSetPropertiesBatch(
+            [SkillParam("JSON array of {name|path|instanceId, r?, g?, b?, a? (0-1; omitted keep current), intensity?, range? (Point/Spot only), spotAngle? (Spot only), shadows? (None|Hard|Soft)}. range/spotAngle the light type cannot carry are listed in each result's skipped, as in light_set_properties.")]
+            string items)
         {
             return BatchExecutor.Execute<BatchLightPropsItem>(items, item =>
             {
@@ -337,18 +382,24 @@ namespace UnitySkills
                 WorkflowManager.SnapshotObject(light);
                 Undo.RecordObject(light, "Batch Set Light Properties");
 
-                if (item.r.HasValue || item.g.HasValue || item.b.HasValue || item.a.HasValue)
-                {
-                    var c = light.color;
-                    light.color = new Color(item.r ?? c.r, item.g ?? c.g, item.b ?? c.b, item.a ?? c.a);
-                }
-                if (item.intensity.HasValue) light.intensity = item.intensity.Value;
-                if (item.range.HasValue && (light.type == LightType.Point || light.type == LightType.Spot))
-                    light.range = item.range.Value;
-                if (shadowMode.HasValue) light.shadows = shadowMode.Value;
+                var applied = new List<string>();
+                var skipped = new List<string>();
+                ApplyLightProperties(light, item.r, item.g, item.b, item.a, item.intensity, item.range, item.spotAngle, shadowMode, applied, skipped);
 
-                return new { target = go.name, success = true };
-            }, item => item.name ?? item.path ?? item.instanceId.ToString());
+                return new
+                {
+                    target = go.name,
+                    success = true,
+                    lightType = light.type.ToString(),
+                    applied = applied.ToArray(),
+                    skipped = skipped.ToArray(),
+                    color = new { r = light.color.r, g = light.color.g, b = light.color.b, a = light.color.a },
+                    intensity = light.intensity,
+                    range = light.range,
+                    spotAngle = light.spotAngle,
+                    shadows = light.shadows.ToString()
+                };
+            }, item => item.name ?? item.path ?? item.instanceId.ToString(), atomic: true);
         }
 
         private class BatchLightPropsItem
@@ -362,6 +413,7 @@ namespace UnitySkills
             public float? a { get; set; }
             public float? intensity { get; set; }
             public float? range { get; set; }
+            public float? spotAngle { get; set; }
             public string shadows { get; set; }
         }
 
@@ -372,6 +424,7 @@ namespace UnitySkills
             RequiresInput = new[] { "gameObject" },
             TracksWorkflow = true, MutatesScene = true)]
         public static object LightAddProbeGroup(string name = null, int instanceId = 0, string path = null,
+            [SkillParam("Probes per axis; a grid is built only when gridX, gridY and gridZ are all > 0, replacing existing probes. Positions are local, centred on X/Z, rising from y=0.")]
             int gridX = 0, int gridY = 0, int gridZ = 0,
             float spacingX = 2f, float spacingY = 1.5f, float spacingZ = 2f)
         {
@@ -419,7 +472,16 @@ namespace UnitySkills
             Undo.RegisterCreatedObjectUndo(go, "Create Reflection Probe");
             WorkflowManager.SnapshotObject(go, SnapshotType.Created);
 
-            return new { success = true, name = go.name, entityId = UnityObjectIdUtility.GetEntityId(go), instanceId = UnityObjectIdUtility.GetObjectId(go), resolution, size = new { x = sizeX, y = sizeY, z = sizeZ } };
+            return new
+            {
+                success = true,
+                name = go.name,
+                entityId = UnityObjectIdUtility.GetEntityId(go),
+                instanceId = UnityObjectIdUtility.GetObjectId(go),
+                resolution = probe.resolution,
+                size = new { x = probe.size.x, y = probe.size.y, z = probe.size.z },
+                position = new { x = go.transform.position.x, y = go.transform.position.y, z = go.transform.position.z }
+            };
         }
 
         [UnitySkill("light_get_lightmap_settings", "Get Lightmap baking settings",

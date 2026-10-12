@@ -41,6 +41,15 @@ namespace UnitySkills
         };
 #endif
 
+#if NETCODE_GAMEOBJECTS
+        private static object NoBuiltInModule(string module, string component) => new
+        {
+            error = $"{component} needs the built-in module {module}, which is disabled in this project. " +
+                    "Enable it under Window > Package Manager > Built-in.",
+            errorCode = "MISSING_PACKAGE",
+        };
+#endif
+
         // ==================================================================================
         // 1. Configuration & validation (5 skills)
         // ==================================================================================
@@ -200,9 +209,14 @@ namespace UnitySkills
 #else
             var nm = FindManager(name);
             if (nm == null) return new { error = $"NetworkManager not found (name={name ?? "<any>"})." };
+            // Validated before the first write (an invalid topology used to be rejected after the other fields were
+            // applied), and the snapshot is taken before the writes so a workflow undo restores the old config.
+            if (!SkillParamUtil.TryParseEnumParam<NetworkTopologyTypes>(networkTopology, "networkTopology", out var topo, out var topoErr))
+                return topoErr;
+            WorkflowManager.SnapshotObject(nm.gameObject);
+            Undo.RecordObject(nm, "Configure NetworkManager");
             if (nm.NetworkConfig == null) nm.NetworkConfig = new NetworkConfig();
 
-            Undo.RecordObject(nm, "Configure NetworkManager");
             var applied = new Dictionary<string, object>();
 
             if (tickRate.HasValue) { nm.NetworkConfig.TickRate = tickRate.Value; applied["tickRate"] = tickRate.Value; }
@@ -220,16 +234,13 @@ namespace UnitySkills
             if (spawnTimeout.HasValue) { nm.NetworkConfig.SpawnTimeout = spawnTimeout.Value; applied["spawnTimeout"] = spawnTimeout.Value; }
             if (enableNetworkLogs.HasValue) { nm.NetworkConfig.EnableNetworkLogs = enableNetworkLogs.Value; applied["enableNetworkLogs"] = enableNetworkLogs.Value; }
             if (autoSpawnPlayerPrefabClientSide.HasValue) { nm.NetworkConfig.AutoSpawnPlayerPrefabClientSide = autoSpawnPlayerPrefabClientSide.Value; applied["autoSpawnPlayerPrefabClientSide"] = autoSpawnPlayerPrefabClientSide.Value; }
-            if (!string.IsNullOrEmpty(networkTopology))
+            if (!string.IsNullOrWhiteSpace(networkTopology))
             {
-                if (!Enum.TryParse<NetworkTopologyTypes>(networkTopology, true, out var topo))
-                    return new { error = $"Invalid networkTopology '{networkTopology}'. Valid: ClientServer, DistributedAuthority." };
                 nm.NetworkConfig.NetworkTopology = topo;
                 applied["networkTopology"] = topo.ToString();
             }
 
             EditorUtility.SetDirty(nm);
-            WorkflowManager.SnapshotObject(nm.gameObject);
             return new { success = true, applied };
 #endif
         }
@@ -330,6 +341,7 @@ namespace UnitySkills
             Category = SkillCategory.Netcode, Operation = SkillOperation.Modify,
             Tags = new[] { "netcode", "ngo", "transport", "connection" },
             Outputs = new[] { "success", "address", "port", "serverListenAddress" },
+            RequiredParams = new[] { "address" },
             MutatesScene = true, RiskLevel = "low", RequiresPackages = new[] { "com.unity.netcode.gameobjects" })]
         public static object SetTransportAddress(
             string address,
@@ -369,6 +381,7 @@ namespace UnitySkills
             Category = SkillCategory.Netcode, Operation = SkillOperation.Modify,
             Tags = new[] { "netcode", "ngo", "transport", "relay" },
             Outputs = new[] { "success" },
+            RequiredParams = new[] { "address", "allocationIdBase64", "keyBase64", "connectionDataBase64" },
             MutatesScene = true, RiskLevel = "medium", RequiresPackages = new[] { "com.unity.netcode.gameobjects" })]
         public static object SetRelayServerData(
             string address,
@@ -1088,8 +1101,12 @@ namespace UnitySkills
             if (go.GetComponent<NetworkObject>() == null)
                 return new { error = $"'{go.name}' lacks a NetworkObject component. Add one first." };
 
+            // NGO compiles NetworkRigidbody / NetworkRigidbody2D only when the matching built-in physics module is
+            // enabled (its own COM_UNITY_MODULES_* version defines, mirrored in UnitySkills.Editor.asmdef); referencing
+            // them unguarded broke compilation of the whole package in projects without that module.
             if (useRigidbody2D)
             {
+#if COM_UNITY_MODULES_PHYSICS2D
                 if (go.GetComponent<Rigidbody2D>() == null)
                     return new { error = $"'{go.name}' lacks a Rigidbody2D. Add it before NetworkRigidbody2D." };
                 if (go.GetComponent<NetworkRigidbody2D>() != null)
@@ -1099,9 +1116,13 @@ namespace UnitySkills
                 EditorUtility.SetDirty(go);
                 WorkflowManager.SnapshotObject(go);
                 return new { success = true, type = nameof(NetworkRigidbody2D) };
+#else
+                return NoBuiltInModule("com.unity.modules.physics2d", "NetworkRigidbody2D");
+#endif
             }
             else
             {
+#if COM_UNITY_MODULES_PHYSICS
                 if (go.GetComponent<Rigidbody>() == null)
                     return new { error = $"'{go.name}' lacks a Rigidbody. Add it before NetworkRigidbody." };
                 if (go.GetComponent<NetworkRigidbody>() != null)
@@ -1111,6 +1132,9 @@ namespace UnitySkills
                 EditorUtility.SetDirty(go);
                 WorkflowManager.SnapshotObject(go);
                 return new { success = true, type = nameof(NetworkRigidbody) };
+#else
+                return NoBuiltInModule("com.unity.modules.physics", "NetworkRigidbody");
+#endif
             }
 #endif
         }
@@ -1131,6 +1155,7 @@ namespace UnitySkills
             if (findErr != null) return findErr;
             if (go.GetComponent<NetworkObject>() == null)
                 return new { error = $"'{go.name}' lacks a NetworkObject component." };
+#if COM_UNITY_MODULES_ANIMATION
             if (go.GetComponent<Animator>() == null)
                 return new { error = $"'{go.name}' lacks an Animator. Add one first." };
             if (go.GetComponent<NetworkAnimator>() != null)
@@ -1140,6 +1165,9 @@ namespace UnitySkills
             EditorUtility.SetDirty(go);
             WorkflowManager.SnapshotObject(go);
             return new { success = true };
+#else
+            return NoBuiltInModule("com.unity.modules.animation", "NetworkAnimator");
+#endif
 #endif
         }
 
@@ -1844,7 +1872,7 @@ namespace UnitySkills
             TracksWorkflow = true,
             Category = SkillCategory.Netcode, Operation = SkillOperation.Modify,
             Tags = new[] { "netcode", "ngo", "componentcontroller", "configure" },
-            Outputs = new[] { "success", "startEnabled", "componentCount", "entries" },
+            Outputs = new[] { "success", "startEnabled", "componentCount", "entries", "warning" },
             MutatesScene = true, RiskLevel = "low", RequiresPackages = new[] { "com.unity.netcode.gameobjects" })]
         public static object ComponentControllerConfigure(
             string name = null,
@@ -1913,9 +1941,20 @@ namespace UnitySkills
                 // Reproduces the Inspector's own drag-and-drop expansion logic: OnValidate() strips whole-GameObject
                 // entries and replaces them with every eligible child component underneath, skipping
                 // NetworkBehaviour/NetworkObject/NetworkManager. Calling it here matches a human dragging the same GameObject onto this field.
+                // A missing or throwing OnValidate used to surface only in the Editor console, invisible to a REST caller.
+                string expansionWarning = null;
                 var onValidate = ccType.GetMethod("OnValidate", BindingFlags.NonPublic | BindingFlags.Instance);
-                try { onValidate?.Invoke(comp, null); }
-                catch (Exception ex) { SkillsLogger.LogWarning($"[netcode_component_controller_configure] OnValidate reflection call failed: {ex.Message}"); }
+                if (onValidate == null)
+                    expansionWarning = "ComponentController.OnValidate was not found on this NGO version, so GameObject entries were not expanded into their components.";
+                else
+                {
+                    try { onValidate.Invoke(comp, null); }
+                    catch (Exception ex)
+                    {
+                        expansionWarning = $"ComponentController.OnValidate failed ({(ex.InnerException ?? ex).Message}), so GameObject entries were not expanded into their components.";
+                        SkillsLogger.LogWarning($"[netcode_component_controller_configure] {expansionWarning}");
+                    }
+                }
 
                 EditorUtility.SetDirty(comp);
                 WorkflowManager.SnapshotObject(comp);
@@ -1945,7 +1984,8 @@ namespace UnitySkills
                     componentCount = finalList?.Count ?? 0,
                     entries,
                     resolvedTargets,
-                    missingTargets = missingTargets.Count > 0 ? missingTargets : null
+                    missingTargets = missingTargets.Count > 0 ? missingTargets : null,
+                    warning = expansionWarning
                 };
             }
             catch (Exception ex)

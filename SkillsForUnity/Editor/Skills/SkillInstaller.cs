@@ -1,9 +1,11 @@
-﻿using UnityEngine;
+using UnityEngine;
 using UnityEditor;
 using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Text;
+using System.Text.RegularExpressions;
+using Newtonsoft.Json.Linq;
 
 namespace UnitySkills
 {
@@ -50,8 +52,9 @@ namespace UnitySkills
         /// <summary>
         /// Resolves $KIMI_CODE_HOME (default ~/.kimi-code). Only visible when Unity was launched
         /// from a shell that exported this variable; otherwise falls back to the documented default.
+        /// Internal so AgentInstructionService can point at the same home for the AGENTS.md guide line.
         /// </summary>
-        private static string KimiCodeHome
+        internal static string KimiCodeHome
         {
             get
             {
@@ -92,7 +95,8 @@ namespace UnitySkills
             try
             {
                 var targetPath = global ? ClaudeGlobalPath : ClaudeProjectPath;
-                return InstallSkill(targetPath, "Claude Code", "ClaudeCode");
+                return InstallSkill(targetPath, "Claude Code", AgentInstructionService.AgentClaudeCode,
+                    AgentInstructionService.GetInstructionFilePath(AgentInstructionService.AgentClaudeCode, global));
             }
             catch (Exception ex)
             {
@@ -105,7 +109,8 @@ namespace UnitySkills
             try
             {
                 var targetPath = global ? AntigravityGlobalPath : AntigravityProjectPath;
-                return InstallSkill(targetPath, "Antigravity", "Antigravity");
+                return InstallSkill(targetPath, "Antigravity", AgentInstructionService.AgentAntigravity,
+                    AgentInstructionService.GetInstructionFilePath(AgentInstructionService.AgentAntigravity, global));
             }
             catch (Exception ex)
             {
@@ -144,7 +149,8 @@ namespace UnitySkills
             try
             {
                 var targetPath = global ? CodexGlobalPath : CodexProjectPath;
-                return InstallSkill(targetPath, "Codex", "Codex");
+                return InstallSkill(targetPath, "Codex", AgentInstructionService.AgentCodex,
+                    AgentInstructionService.GetInstructionFilePath(AgentInstructionService.AgentCodex, global));
             }
             catch (Exception ex)
             {
@@ -170,7 +176,8 @@ namespace UnitySkills
             try
             {
                 var targetPath = global ? CursorGlobalPath : CursorProjectPath;
-                return InstallSkill(targetPath, "Cursor", "Cursor");
+                return InstallSkill(targetPath, "Cursor", AgentInstructionService.AgentCursor,
+                    AgentInstructionService.GetInstructionFilePath(AgentInstructionService.AgentCursor, global));
             }
             catch (Exception ex)
             {
@@ -196,7 +203,8 @@ namespace UnitySkills
             try
             {
                 var targetPath = global ? OpenCodeGlobalPath : OpenCodeProjectPath;
-                return InstallSkill(targetPath, "OpenCode", "OpenCode");
+                return InstallSkill(targetPath, "OpenCode", AgentInstructionService.AgentOpenCode,
+                    AgentInstructionService.GetInstructionFilePath(AgentInstructionService.AgentOpenCode, global));
             }
             catch (Exception ex)
             {
@@ -222,7 +230,8 @@ namespace UnitySkills
             try
             {
                 var targetPath = global ? KimiCodeGlobalPath : KimiCodeProjectPath;
-                return InstallSkill(targetPath, "Kimi Code", "KimiCode");
+                return InstallSkill(targetPath, "Kimi Code", AgentInstructionService.AgentKimiCode,
+                    AgentInstructionService.GetInstructionFilePath(AgentInstructionService.AgentKimiCode, global));
             }
             catch (Exception ex)
             {
@@ -277,7 +286,13 @@ namespace UnitySkills
         {
             public string DisplayName;
             public string Path;
+            /// <summary>Agent id understood by <see cref="AgentInstructionService"/> (e.g. "ClaudeCode").</summary>
+            public string AgentId;
+            /// <summary>Project scope installs sit under the project root; global ones under the user's home.</summary>
+            public bool IsGlobal;
             public Func<bool> IsInstalled;
+            /// <summary>Version stamped on the installed copy, or null when it can't be determined (see <see cref="ReadInstalledVersion"/>).</summary>
+            public Func<string> InstalledVersion;
             public Func<(bool success, string message)> Install;
         }
 
@@ -288,31 +303,111 @@ namespace UnitySkills
         /// </summary>
         public static IEnumerable<InstallTarget> EnumerateTargets()
         {
-            yield return MakeTarget("Claude Code (Project)", ClaudeProjectPath, () => IsClaudeProjectInstalled, () => InstallClaude(false));
-            yield return MakeTarget("Claude Code (Global)", ClaudeGlobalPath, () => IsClaudeGlobalInstalled, () => InstallClaude(true));
-            yield return MakeTarget("Codex (Project)", CodexProjectPath, () => IsCodexProjectInstalled, () => InstallCodex(false));
-            yield return MakeTarget("Codex (Global)", CodexGlobalPath, () => IsCodexGlobalInstalled, () => InstallCodex(true));
-            yield return MakeTarget("Antigravity (Project)", AntigravityProjectPath, () => IsAntigravityProjectInstalled, () => InstallAntigravity(false));
-            yield return MakeTarget("Antigravity (Global)", AntigravityGlobalPath, () => IsAntigravityGlobalInstalled, () => InstallAntigravity(true));
-            yield return MakeTarget("Cursor (Project)", CursorProjectPath, () => IsCursorProjectInstalled, () => InstallCursor(false));
-            yield return MakeTarget("Cursor (Global)", CursorGlobalPath, () => IsCursorGlobalInstalled, () => InstallCursor(true));
-            yield return MakeTarget("OpenCode (Project)", OpenCodeProjectPath, () => IsOpenCodeProjectInstalled, () => InstallOpenCode(false));
-            yield return MakeTarget("OpenCode (Global)", OpenCodeGlobalPath, () => IsOpenCodeGlobalInstalled, () => InstallOpenCode(true));
-            yield return MakeTarget("Kimi Code (Project)", KimiCodeProjectPath, () => IsKimiCodeProjectInstalled, () => InstallKimiCode(false));
-            yield return MakeTarget("Kimi Code (Global)", KimiCodeGlobalPath, () => IsKimiCodeGlobalInstalled, () => InstallKimiCode(true));
-            yield return MakeTarget("Oh My Pi (Project)", OhMyPiProjectPath, () => IsOhMyPiProjectInstalled, () => InstallOhMyPi(false));
-            yield return MakeTarget("Oh My Pi (Global)", OhMyPiGlobalPath, () => IsOhMyPiGlobalInstalled, () => InstallOhMyPi(true));
+            yield return MakeTarget(AgentInstructionService.AgentClaudeCode, false, "Claude Code (Project)", ClaudeProjectPath, () => IsClaudeProjectInstalled, () => InstallClaude(false));
+            yield return MakeTarget(AgentInstructionService.AgentClaudeCode, true, "Claude Code (Global)", ClaudeGlobalPath, () => IsClaudeGlobalInstalled, () => InstallClaude(true));
+            yield return MakeTarget(AgentInstructionService.AgentCodex, false, "Codex (Project)", CodexProjectPath, () => IsCodexProjectInstalled, () => InstallCodex(false));
+            yield return MakeTarget(AgentInstructionService.AgentCodex, true, "Codex (Global)", CodexGlobalPath, () => IsCodexGlobalInstalled, () => InstallCodex(true));
+            yield return MakeTarget(AgentInstructionService.AgentAntigravity, false, "Antigravity (Project)", AntigravityProjectPath, () => IsAntigravityProjectInstalled, () => InstallAntigravity(false));
+            yield return MakeTarget(AgentInstructionService.AgentAntigravity, true, "Antigravity (Global)", AntigravityGlobalPath, () => IsAntigravityGlobalInstalled, () => InstallAntigravity(true));
+            yield return MakeTarget(AgentInstructionService.AgentCursor, false, "Cursor (Project)", CursorProjectPath, () => IsCursorProjectInstalled, () => InstallCursor(false));
+            yield return MakeTarget(AgentInstructionService.AgentCursor, true, "Cursor (Global)", CursorGlobalPath, () => IsCursorGlobalInstalled, () => InstallCursor(true));
+            yield return MakeTarget(AgentInstructionService.AgentOpenCode, false, "OpenCode (Project)", OpenCodeProjectPath, () => IsOpenCodeProjectInstalled, () => InstallOpenCode(false));
+            yield return MakeTarget(AgentInstructionService.AgentOpenCode, true, "OpenCode (Global)", OpenCodeGlobalPath, () => IsOpenCodeGlobalInstalled, () => InstallOpenCode(true));
+            yield return MakeTarget(AgentInstructionService.AgentKimiCode, false, "Kimi Code (Project)", KimiCodeProjectPath, () => IsKimiCodeProjectInstalled, () => InstallKimiCode(false));
+            yield return MakeTarget(AgentInstructionService.AgentKimiCode, true, "Kimi Code (Global)", KimiCodeGlobalPath, () => IsKimiCodeGlobalInstalled, () => InstallKimiCode(true));
+            // Oh My Pi has no agent-instruction file mapping (null agentId = skipped by AgentInstructionService).
+            yield return MakeTarget(null, false, "Oh My Pi (Project)", OhMyPiProjectPath, () => IsOhMyPiProjectInstalled, () => InstallOhMyPi(false));
+            yield return MakeTarget(null, true, "Oh My Pi (Global)", OhMyPiGlobalPath, () => IsOhMyPiGlobalInstalled, () => InstallOhMyPi(true));
         }
 
-        private static InstallTarget MakeTarget(string displayName, string path, Func<bool> isInstalled, Func<(bool, string)> install)
+        private static InstallTarget MakeTarget(string agentId, bool isGlobal, string displayName, string path, Func<bool> isInstalled, Func<(bool, string)> install)
         {
             return new InstallTarget
             {
                 DisplayName = displayName,
                 Path = path,
+                AgentId = agentId,
+                IsGlobal = isGlobal,
                 IsInstalled = isInstalled,
+                InstalledVersion = () => ReadInstalledVersion(path),
                 Install = install
             };
+        }
+
+        /// <summary>How an installed copy's version relates to the current package.</summary>
+        public enum InstalledVersionState
+        {
+            /// <summary>No readable version stamp; treated like an old copy.</summary>
+            Unknown,
+            Older,
+            Current,
+            Newer
+        }
+
+        /// <summary>
+        /// Compares an installed copy's version stamp with the current package version. Both sides must parse as
+        /// System.Version; otherwise the result is Unknown. Shared by the panel's Install/Update buttons and the
+        /// post-upgrade auto-sync so both apply the same "never downgrade, never re-copy the same version" rule.
+        /// </summary>
+        public static InstalledVersionState CompareInstalledVersion(string installedVersion, string currentVersion)
+        {
+            if (string.IsNullOrWhiteSpace(installedVersion) ||
+                !Version.TryParse(installedVersion.Trim(), out var installed) ||
+                !Version.TryParse(currentVersion?.Trim(), out var current))
+                return InstalledVersionState.Unknown;
+
+            var order = installed.CompareTo(current);
+            return order < 0 ? InstalledVersionState.Older
+                 : order > 0 ? InstalledVersionState.Newer
+                 : InstalledVersionState.Current;
+        }
+
+        private static readonly Regex PyVersionPattern =
+            new Regex("^__version__\\s*=\\s*\"([^\"]+)\"", RegexOptions.Multiline | RegexOptions.Compiled);
+
+        /// <summary>
+        /// Reads the package version an installed copy was produced from. Primary source is the "version" field
+        /// written to scripts/agent_config.json at install time; copies made by older packages lack that field,
+        /// so it falls back to the __version__ constant in scripts/unity_skills.py, which every copy ships.
+        /// Returns null when neither is readable — callers treat unknown as "old copy".
+        /// </summary>
+        public static string ReadInstalledVersion(string targetPath)
+        {
+            if (string.IsNullOrEmpty(targetPath))
+                return null;
+
+            var scriptsPath = Path.Combine(targetPath, "scripts");
+            try
+            {
+                var configPath = Path.Combine(scriptsPath, "agent_config.json");
+                if (File.Exists(configPath))
+                {
+                    var version = JObject.Parse(File.ReadAllText(configPath, Encoding.UTF8))["version"]?.ToString();
+                    if (!string.IsNullOrWhiteSpace(version))
+                        return version.Trim();
+                }
+            }
+            catch
+            {
+                // Corrupt or hand-edited config: fall through to the script constant.
+            }
+
+            try
+            {
+                var scriptPath = Path.Combine(scriptsPath, "unity_skills.py");
+                if (File.Exists(scriptPath))
+                {
+                    var match = PyVersionPattern.Match(File.ReadAllText(scriptPath, Encoding.UTF8));
+                    if (match.Success)
+                        return match.Groups[1].Value.Trim();
+                }
+            }
+            catch
+            {
+                // Unreadable script: version unknown.
+            }
+
+            return null;
         }
 
         public static (bool success, string message) InstallCustom(string path, string agentName = "Custom")
@@ -340,7 +435,7 @@ namespace UnitySkills
             return (true, targetPath);
         }
 
-        private static (bool success, string message) InstallSkill(string targetPath, string name, string agentId)
+        private static (bool success, string message) InstallSkill(string targetPath, string name, string agentId, string instructionFilePath = null)
         {
             if (!Directory.Exists(targetPath))
                 Directory.CreateDirectory(targetPath);
@@ -353,8 +448,15 @@ namespace UnitySkills
             var scriptsPath = Path.Combine(targetPath, "scripts");
             if (!Directory.Exists(scriptsPath))
                 Directory.CreateDirectory(scriptsPath);
-            var agentConfig = $"{{\"agentId\": \"{agentId}\", \"installedAt\": \"{DateTime.UtcNow:O}\"}}";
+            // "version" lets SkillInstallSyncService tell whether a copy shared between projects (global scope) is
+            // already newer than this project's package, so a lagging project never downgrades it.
+            var agentConfig = $"{{\"agentId\": \"{agentId}\", \"version\": \"{SkillsLogger.Version}\", \"installedAt\": \"{DateTime.UtcNow:O}\"}}";
             File.WriteAllText(Path.Combine(scriptsPath, "agent_config.json"), agentConfig, utf8NoBom);
+
+            // Optional "prefer Unity Skills" guide line in the tool's root instruction file
+            // (CLAUDE.md / AGENTS.md / GEMINI.md). Gated by the feature toggle inside the service.
+            if (instructionFilePath != null)
+                AgentInstructionService.UpsertIfEnabled(instructionFilePath);
 
             SkillsLogger.Log($"Installed skill to: {targetPath} (Agent: {agentId})");
             return (true, targetPath);

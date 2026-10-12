@@ -18,7 +18,10 @@ namespace UnitySkills
             Outputs = new[] { "success", "name", "path" },
             RequiresInput = new[] { "name" },
             MutatesAssets = true)]
-        public static object AnimatorCreateController(string name, string folder = "Assets/Animations")
+        public static object AnimatorCreateController(
+            [SkillParam("Bare controller name, no path separators; saved as '<folder>/<name>.controller'.")]
+            string name,
+            string folder = "Assets/Animations")
         {
             if (Validate.Required(name, "name") is object nameErr) return nameErr;
             if (name.Contains("/") || name.Contains("\\") || name.Contains(".."))
@@ -45,9 +48,13 @@ namespace UnitySkills
             Category = SkillCategory.Animator, Operation = SkillOperation.Modify,
             Tags = new[] { "animator", "parameter", "add", "controller" },
             Outputs = new[] { "success", "controller", "parameter", "type" },
+            RequiredParams = new[] { "paramName" },
             RequiresInput = new[] { "controllerPath" },
             MutatesAssets = true)]
-        public static object AnimatorAddParameter(string controllerPath, string paramName, string paramType = "float", float defaultFloat = 0, int defaultInt = 0, bool defaultBool = false)
+        public static object AnimatorAddParameter(string controllerPath, string paramName,
+            [SkillParam("float, int, bool or trigger (case-insensitive); only the matching defaultFloat/defaultInt/defaultBool is applied.")]
+            string paramType = "float",
+            float defaultFloat = 0, int defaultInt = 0, bool defaultBool = false)
         {
             var pathErr = Validate.SafePath(controllerPath, "controllerPath");
             if (pathErr != null) return pathErr;
@@ -139,11 +146,14 @@ namespace UnitySkills
             Category = SkillCategory.Animator, Operation = SkillOperation.Modify,
             Tags = new[] { "animator", "parameter", "set", "value" },
             Outputs = new[] { "success", "gameObject", "parameter", "value" },
+            RequiredParams = new[] { "paramName" },
             RequiresInput = new[] { "gameObject" },
             MutatesScene = true)]
         public static object AnimatorSetParameter(
             string name = null, int instanceId = 0, string path = null,
-            string paramName = null, string paramType = "float",
+            string paramName = null,
+            [SkillParam("float, int, bool or trigger (case-insensitive); must match the parameter's declared type on the controller, or this errors.")]
+            string paramType = "float",
             float floatValue = 0, int intValue = 0, bool boolValue = false)
         {
             if (Validate.Required(paramName, "paramName") is object err) return err;
@@ -218,8 +228,14 @@ namespace UnitySkills
             Category = SkillCategory.Animator, Operation = SkillOperation.Execute,
             Tags = new[] { "animator", "play", "state", "animation" },
             Outputs = new[] { "success", "gameObject", "state", "layer" },
+            RequiredParams = new[] { "stateName" },
             RequiresInput = new[] { "gameObject" })]
-        public static object AnimatorPlay(string name = null, int instanceId = 0, string path = null, string stateName = null, int layer = 0, float normalizedTime = 0)
+        public static object AnimatorPlay(string name = null, int instanceId = 0, string path = null,
+            [SkillParam("Simple state name, or a 'SubMachine.State' dotted path for a state inside a sub-state machine.")]
+            string stateName = null,
+            int layer = 0,
+            [SkillParam("Normalized start position within the state's clip: 0 = beginning, 1 = end.")]
+            float normalizedTime = 0)
         {
             if (Validate.Required(stateName, "stateName") is object err1) return err1;
 
@@ -393,22 +409,31 @@ namespace UnitySkills
             Category = SkillCategory.Animator, Operation = SkillOperation.Create | SkillOperation.Modify,
             Tags = new[] { "animator", "state", "add", "layer" },
             Outputs = new[] { "success", "controller", "stateName", "layer" },
+            RequiredParams = new[] { "stateName" },
             RequiresInput = new[] { "controllerPath" },
             TracksWorkflow = true,
             MutatesAssets = true)]
         public static object AnimatorAddState(string controllerPath, string stateName, string clipPath = null, int layer = 0)
         {
+            var pathErr = Validate.SafePath(controllerPath, "controllerPath");
+            if (pathErr != null) return pathErr;
+            if (Validate.Required(stateName, "stateName") is object nameErr) return nameErr;
+
             var controller = AssetDatabase.LoadAssetAtPath<AnimatorController>(controllerPath);
             if (controller == null) return new { error = $"Controller not found: {controllerPath}" };
             if (layer < 0 || layer >= controller.layers.Length) return new { error = $"Invalid layer: {layer}" };
-
-            var sm = controller.layers[layer].stateMachine;
-            var state = sm.AddState(stateName);
+            // Resolved before the state is added: an unresolvable path used to add a state with no motion and report success.
+            AnimationClip clip = null;
             if (!string.IsNullOrEmpty(clipPath))
             {
-                var clip = AssetDatabase.LoadAssetAtPath<AnimationClip>(clipPath);
-                if (clip != null) state.motion = clip;
+                clip = AssetDatabase.LoadAssetAtPath<AnimationClip>(clipPath);
+                if (clip == null) return new { error = $"AnimationClip not found: {clipPath}" };
             }
+
+            WorkflowManager.SnapshotObject(controller);
+            var sm = controller.layers[layer].stateMachine;
+            var state = sm.AddState(stateName);
+            if (clip != null) state.motion = clip;
             AssetDatabase.SaveAssets();
             return new { success = true, controller = controllerPath, stateName, layer };
         }
@@ -417,11 +442,17 @@ namespace UnitySkills
             Category = SkillCategory.Animator, Operation = SkillOperation.Create | SkillOperation.Modify,
             Tags = new[] { "animator", "transition", "state", "flow" },
             Outputs = new[] { "success", "from", "to", "layer", "hasExitTime", "duration" },
+            RequiredParams = new[] { "fromState", "toState" },
             RequiresInput = new[] { "controllerPath" },
             TracksWorkflow = true,
             MutatesAssets = true)]
         public static object AnimatorAddTransition(string controllerPath, string fromState, string toState, int layer = 0, bool hasExitTime = true, float duration = 0.25f)
         {
+            var pathErr = Validate.SafePath(controllerPath, "controllerPath");
+            if (pathErr != null) return pathErr;
+            if (Validate.Required(fromState, "fromState") is object fromErr) return fromErr;
+            if (Validate.Required(toState, "toState") is object toErr) return toErr;
+
             var controller = AssetDatabase.LoadAssetAtPath<AnimatorController>(controllerPath);
             if (controller == null) return new { error = $"Controller not found: {controllerPath}" };
             if (layer < 0 || layer >= controller.layers.Length) return new { error = $"Invalid layer: {layer}" };
@@ -437,6 +468,7 @@ namespace UnitySkills
             if (src == null) return new { error = $"State not found: {fromState}" };
             if (dst == null) return new { error = $"State not found: {toState}" };
 
+            WorkflowManager.SnapshotObject(controller);
             var transition = src.AddTransition(dst);
             transition.hasExitTime = hasExitTime;
             transition.duration = duration;

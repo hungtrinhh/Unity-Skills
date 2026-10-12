@@ -46,10 +46,29 @@ namespace UnitySkills
         private bool _isDragging;
         private bool _tokenSettingsWriteInProgress;
         private IVisualElementScheduledItem _maximumEffectAnimation;
+        private IVisualElementScheduledItem _resizeSettleItem;
+        private IVisualElementScheduledItem _resizeQuietItem;
         private float _maximumEffectTime;
         private const float ActiveEffectDuration = 3.5f; // Play 60fps dynamic animation for 3.5s then sleep
+        // Maximum-level gradient grid: cols x rows per-cell Painter2D fills, which produce the
+        // mosaic look of the track. During an EditorWindow resize only the column count shrinks;
+        // the six rows stay so the frozen waveform keeps its shape (#60).
+        private const int MaximumTrackGradientColumns = 48;
+        private const int MaximumTrackGradientRows = 6;
+        private const long ResizeSettleDelayMs = 120;
+        // Hover triggers stay suppressed for this long after the last geometry change. On 6000.x
+        // the deferred mesh-generation pipeline corrupts frames when a 60fps animation repaint is
+        // generated alongside resize-driven repaints (including their still-draining backlog), so
+        // a resize-paused animation is never auto-resumed and hover may only re-trigger it once
+        // the resize is comfortably over (#60).
+        private const long ResizeQuietDelayMs = 300;
+        private const float MaximumTrackSliceWidth = 12f;
+        private const int MinimumMaximumTrackHorizontalSlices = 4;
+        private const int MaximumMaximumTrackHorizontalSlices = 24;
         private float _effectActiveTimer;
         private TokenLevel _previousLevel = (TokenLevel)(-1);
+        private bool _isResizing;
+        private bool _maximumEffectPausedForResize;
         private bool _disposed;
 
         private readonly List<Particle> _galaxyParticles = new List<Particle>
@@ -130,7 +149,7 @@ namespace UnitySkills
                 _tokenLevelTrack.RegisterCallback<PointerEnterEvent>(_ => { if (SkillsTokenLevel.Current == TokenLevel.Maximum) TriggerMaximumEffect(); });
                 _tokenLevelTrack.RegisterCallback<ClickEvent>(OnTrackClicked);
                 _tokenLevelTrack.generateVisualContent += DrawTokenSlider;
-                _tokenLevelTrack.RegisterCallback<GeometryChangedEvent>(_ => _tokenLevelTrack.MarkDirtyRepaint());
+                _tokenLevelTrack.RegisterCallback<GeometryChangedEvent>(OnTrackGeometryChanged);
             }
 
             if (_tokenLevelScaleMinimal != null)
@@ -279,6 +298,53 @@ namespace UnitySkills
         private void OnRootDetached(DetachFromPanelEvent _)
         {
             _maximumEffectAnimation?.Pause();
+            _resizeSettleItem?.Pause();
+            _resizeQuietItem?.Pause();
+            _resizeQuietItem = null;
+            _isResizing = false;
+            _maximumEffectPausedForResize = false;
+        }
+
+        private void OnTrackGeometryChanged(GeometryChangedEvent evt)
+        {
+            if (_disposed || _tokenLevelTrack == null ||
+                (Mathf.Approximately(evt.oldRect.width, evt.newRect.width) &&
+                 Mathf.Approximately(evt.oldRect.height, evt.newRect.height)))
+                return;
+
+            if (SkillsTokenLevel.Current != TokenLevel.Maximum)
+            {
+                _isResizing = false;
+                return;
+            }
+
+            // EditorWindow resize sends a burst of geometry changes. During that burst the
+            // track is redrawn for every new width, so use the reduced-column version of the
+            // maximum gradient (rows stay, so the frozen waveform keeps its shape) and keep the
+            // animation paused: an animation repaint generated alongside resize-driven repaints
+            // (or their still-draining backlog) comes out corrupted on 6000.x. The full
+            // 48-column grid returns ResizeSettleDelayMs after the last change; the quiet window
+            // ends at ResizeQuietDelayMs, but the paused animation is NOT auto-resumed — it stays
+            // frozen until the next hover/click re-triggers it.
+            _isResizing = true;
+            if (!_maximumEffectPausedForResize)
+            {
+                _maximumEffectAnimation?.Pause();
+                _maximumEffectPausedForResize = true;
+            }
+            _resizeSettleItem?.Pause();
+            _resizeSettleItem = _tokenLevelTrack.schedule.Execute(() =>
+            {
+                _resizeSettleItem = null;
+                _isResizing = false;
+                _tokenLevelTrack?.MarkDirtyRepaint();
+            }).StartingIn(ResizeSettleDelayMs);
+            _resizeQuietItem?.Pause();
+            _resizeQuietItem = _tokenLevelTrack.schedule.Execute(() =>
+            {
+                _resizeQuietItem = null;
+                _maximumEffectPausedForResize = false;
+            }).StartingIn(ResizeQuietDelayMs);
         }
 
         public void RefreshTokenLevelLocalization()
@@ -428,12 +494,21 @@ namespace UnitySkills
             {
                 _effectActiveTimer = 0f;
                 _maximumEffectAnimation?.Pause();
+                _resizeSettleItem?.Pause();
+                _resizeSettleItem = null;
+                _resizeQuietItem?.Pause();
+                _resizeQuietItem = null;
+                _isResizing = false;
+                _maximumEffectPausedForResize = false;
             }
         }
 
         private void TriggerMaximumEffect()
         {
             if (_disposed || _root.panel == null) return;
+            // Suppress hover-triggered effects while a resize quiet window holds the animation:
+            // a repaint started here would race a resize-driven repaint on 6000.x (#60).
+            if (_maximumEffectPausedForResize) return;
             _effectActiveTimer = ActiveEffectDuration;
 
             if (_maximumEffectAnimation == null)
@@ -531,12 +606,17 @@ namespace UnitySkills
                     painter.ClosePath();
                     painter.Fill();
 
-                    // Middle slices with curved wave surge when active -> settled static galaxy gradient
+                    // Middle slices with curved wave surge when active -> settled static galaxy gradient.
+                    // A resize burst redraws the track for every new width, so while _isResizing
+                    // only the column count degrades to a cheap width-scaled strip; the six rows
+                    // stay so the frozen waveform keeps its shape (OnTrackGeometryChanged).
                     float straightW = thumbX - xCenterLeft;
                     if (straightW > 0f)
                     {
-                        int xSlices = 48;
-                        int ySlices = 6;
+                        int xSlices = _isResizing
+                            ? GetMaximumTrackHorizontalSliceCount(straightW)
+                            : MaximumTrackGradientColumns;
+                        int ySlices = MaximumTrackGradientRows;
                         float sliceW = straightW / xSlices;
                         float sliceH = rect.height / ySlices;
 
@@ -728,6 +808,20 @@ namespace UnitySkills
             return Color.Lerp(staticCol, dynamicCol, dynamicBlend);
         }
 
+        /// <summary>
+        /// Keeps the resize-time maximum-level gradient bounded. The normal 48x6 slice grid is
+        /// intentionally retained after the resize settles, while this width-scaled cap keeps
+        /// each intermediate repaint proportional to the visible control.
+        /// </summary>
+        internal static int GetMaximumTrackHorizontalSliceCount(float straightWidth)
+        {
+            if (straightWidth <= 0f) return 0;
+            return Mathf.Clamp(
+                Mathf.CeilToInt(straightWidth / MaximumTrackSliceWidth),
+                MinimumMaximumTrackHorizontalSlices,
+                MaximumMaximumTrackHorizontalSlices);
+        }
+
         private static Color EvaluateGalaxyColor(float u)
         {
             if (u <= 0.35f)
@@ -817,9 +911,17 @@ namespace UnitySkills
             _root.UnregisterCallback<AttachToPanelEvent>(OnRootAttached);
             _root.UnregisterCallback<DetachFromPanelEvent>(OnRootDetached);
             if (_tokenLevelTrack != null)
+            {
                 _tokenLevelTrack.generateVisualContent -= DrawTokenSlider;
+                _tokenLevelTrack.UnregisterCallback<GeometryChangedEvent>(OnTrackGeometryChanged);
+            }
             _maximumEffectAnimation?.Pause();
+            _resizeSettleItem?.Pause();
+            _resizeQuietItem?.Pause();
             _maximumEffectAnimation = null;
+            _resizeSettleItem = null;
+            _resizeQuietItem = null;
+            _maximumEffectPausedForResize = false;
         }
     }
 }

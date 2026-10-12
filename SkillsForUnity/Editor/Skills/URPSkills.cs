@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Collections.Generic;
 using System.Linq;
 using UnityEditor;
 using UnityEngine;
@@ -20,6 +21,7 @@ namespace UnitySkills
             Tags = new[] { "urp", "asset", "renderer", "info" },
             Outputs = new[] { "asset", "renderers" },
             ReadOnly = true,
+            RequiresPackages = new[] { "com.unity.render-pipelines.universal" },
             Mode = SkillMode.SemiAuto)]
         public static object URPGetInfo(string assetPath = null) => RenderPipelineSkillsCommon.NoURP();
 
@@ -28,7 +30,9 @@ namespace UnitySkills
             Tags = new[] { "urp", "asset", "settings", "modify" },
             Outputs = new[] { "asset" },
             // Mirrors the real (URP) branch so metadata stays identical when the package is absent.
-            MutatesAssets = true)]
+            TracksWorkflow = true,
+            MutatesAssets = true,
+            RequiresPackages = new[] { "com.unity.render-pipelines.universal" })]
         public static object URPSetAssetSettings(string assetPath = null, bool? supportsHDR = null, int? msaaSampleCount = null,
             float? renderScale = null, bool? supportsMainLightShadows = null, bool? supportsAdditionalLightShadows = null,
             bool? supportsCameraDepthTexture = null, bool? supportsCameraOpaqueTexture = null, float? shadowDistance = null) => RenderPipelineSkillsCommon.NoURP();
@@ -38,6 +42,7 @@ namespace UnitySkills
             Tags = new[] { "urp", "renderers", "list" },
             Outputs = new[] { "count", "renderers" },
             ReadOnly = true,
+            RequiresPackages = new[] { "com.unity.render-pipelines.universal" },
             Mode = SkillMode.SemiAuto)]
         public static object URPListRenderers(string assetPath = null) => RenderPipelineSkillsCommon.NoURP();
 
@@ -46,6 +51,7 @@ namespace UnitySkills
             Tags = new[] { "urp", "renderer feature", "list" },
             Outputs = new[] { "count", "features" },
             ReadOnly = true,
+            RequiresPackages = new[] { "com.unity.render-pipelines.universal" },
             Mode = SkillMode.SemiAuto)]
         public static object URPListRendererFeatures(string assetPath = null, int rendererIndex = -1, string rendererDataPath = null) => RenderPipelineSkillsCommon.NoURP();
 
@@ -54,7 +60,10 @@ namespace UnitySkills
             Tags = new[] { "urp", "renderer feature", "add" },
             Outputs = new[] { "feature", "renderer" },
             // Mirrors the real (URP) branch so metadata stays identical when the package is absent.
-            MutatesAssets = true)]
+            TracksWorkflow = true,
+            MutatesAssets = true,
+            RequiresInput = new[] { "featureType" },
+            RequiresPackages = new[] { "com.unity.render-pipelines.universal" })]
         public static object URPAddRendererFeature(string featureType, string assetPath = null, int rendererIndex = -1, string rendererDataPath = null, string featureName = null, bool active = true) => RenderPipelineSkillsCommon.NoURP();
 
         [UnitySkill("urp_remove_renderer_feature", "Remove a renderer feature from a URP renderer",
@@ -63,7 +72,9 @@ namespace UnitySkills
             Outputs = new[] { "removedFeature", "renderer" },
             RiskLevel = "medium",
             // Mirrors the real (URP) branch so metadata stays identical when the package is absent.
-            MutatesAssets = true)]
+            TracksWorkflow = true,
+            MutatesAssets = true,
+            RequiresPackages = new[] { "com.unity.render-pipelines.universal" })]
         public static object URPRemoveRendererFeature(string assetPath = null, int rendererIndex = -1, string rendererDataPath = null, int featureIndex = -1, string featureName = null, string featureType = null) => RenderPipelineSkillsCommon.NoURP();
 
         [UnitySkill("urp_set_renderer_feature_active", "Enable or disable a renderer feature on a URP renderer",
@@ -71,7 +82,9 @@ namespace UnitySkills
             Tags = new[] { "urp", "renderer feature", "active" },
             Outputs = new[] { "feature", "active" },
             // Mirrors the real (URP) branch so metadata stays identical when the package is absent.
-            MutatesAssets = true)]
+            TracksWorkflow = true,
+            MutatesAssets = true,
+            RequiresPackages = new[] { "com.unity.render-pipelines.universal" })]
         public static object URPSetRendererFeatureActive(bool active, string assetPath = null, int rendererIndex = -1, string rendererDataPath = null, int featureIndex = -1, string featureName = null, string featureType = null) => RenderPipelineSkillsCommon.NoURP();
 #else
         [UnitySkill("urp_get_info", "Get information about the active URP asset and renderer setup",
@@ -143,18 +156,23 @@ namespace UnitySkills
             if (shadowDistance.HasValue && shadowDistance.Value < 0f)
                 return SkillParamUtil.InvalidValueError(SkillParamUtil.FormatFloatR(shadowDistance.Value), "shadowDistance", new[] { ">= 0" });
 
+            // These are private field names (all eight exist in URP 14 and 17): a renamed one used to be skipped
+            // silently, so nothing is applied unless every requested field was found.
+            var serializedObject = new SerializedObject(asset);
+            var missing = new List<string>();
+            SetIfProvided(serializedObject, "m_SupportsHDR", supportsHDR, "supportsHDR", missing);
+            SetIfProvided(serializedObject, "m_MSAA", msaaSampleCount, "msaaSampleCount", missing);
+            SetIfProvided(serializedObject, "m_RenderScale", renderScale, "renderScale", missing);
+            SetIfProvided(serializedObject, "m_MainLightShadowsSupported", supportsMainLightShadows, "supportsMainLightShadows", missing);
+            SetIfProvided(serializedObject, "m_AdditionalLightShadowsSupported", supportsAdditionalLightShadows, "supportsAdditionalLightShadows", missing);
+            SetIfProvided(serializedObject, "m_RequireDepthTexture", supportsCameraDepthTexture, "supportsCameraDepthTexture", missing);
+            SetIfProvided(serializedObject, "m_RequireOpaqueTexture", supportsCameraOpaqueTexture, "supportsCameraOpaqueTexture", missing);
+            SetIfProvided(serializedObject, "m_ShadowDistance", shadowDistance, "shadowDistance", missing);
+            if (missing.Count > 0)
+                return new { error = $"This URP version's asset has no serialized field for {string.Join(", ", missing)}; nothing was changed." };
+
             WorkflowManager.SnapshotObject(asset);
             Undo.RegisterCompleteObjectUndo(asset, "Modify URP Asset Settings");
-
-            var serializedObject = new SerializedObject(asset);
-            SetIfProvided(serializedObject, "m_SupportsHDR", supportsHDR);
-            SetIfProvided(serializedObject, "m_MSAA", msaaSampleCount);
-            SetIfProvided(serializedObject, "m_RenderScale", renderScale);
-            SetIfProvided(serializedObject, "m_MainLightShadowsSupported", supportsMainLightShadows);
-            SetIfProvided(serializedObject, "m_AdditionalLightShadowsSupported", supportsAdditionalLightShadows);
-            SetIfProvided(serializedObject, "m_RequireDepthTexture", supportsCameraDepthTexture);
-            SetIfProvided(serializedObject, "m_RequireOpaqueTexture", supportsCameraOpaqueTexture);
-            SetIfProvided(serializedObject, "m_ShadowDistance", shadowDistance);
             serializedObject.ApplyModifiedPropertiesWithoutUndo();
 
             EditorUtility.SetDirty(asset);
@@ -465,7 +483,7 @@ namespace UnitySkills
             return false;
         }
 
-        private static void SetIfProvided(SerializedObject serializedObject, string propertyName, bool? value)
+        private static void SetIfProvided(SerializedObject serializedObject, string propertyName, bool? value, string label, List<string> missing)
         {
             if (!value.HasValue)
                 return;
@@ -473,20 +491,23 @@ namespace UnitySkills
             var property = serializedObject.FindProperty(propertyName);
             if (property != null)
                 property.boolValue = value.Value;
+            else
+                missing.Add(label);
         }
 
-        private static void SetIfProvided(SerializedObject serializedObject, string propertyName, int? value)
+        private static void SetIfProvided(SerializedObject serializedObject, string propertyName, int? value, string label, List<string> missing)
         {
             if (!value.HasValue)
                 return;
 
             var property = serializedObject.FindProperty(propertyName);
-            if (property == null)
-                return;
-            property.intValue = value.Value;
+            if (property != null)
+                property.intValue = value.Value;
+            else
+                missing.Add(label);
         }
 
-        private static void SetIfProvided(SerializedObject serializedObject, string propertyName, float? value)
+        private static void SetIfProvided(SerializedObject serializedObject, string propertyName, float? value, string label, List<string> missing)
         {
             if (!value.HasValue)
                 return;
@@ -494,6 +515,8 @@ namespace UnitySkills
             var property = serializedObject.FindProperty(propertyName);
             if (property != null)
                 property.floatValue = value.Value;
+            else
+                missing.Add(label);
         }
 #endif
     }

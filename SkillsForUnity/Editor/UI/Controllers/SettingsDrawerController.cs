@@ -29,6 +29,14 @@ namespace UnitySkills
             SkillsOperatingMode.Bypass,
         };
 
+        // Same position-for-position mapping for the dryRun policy dropdown, whose choices are localized.
+        private static readonly DryRunPolicy[] _dryRunPolicyOrder = new[]
+        {
+            DryRunPolicy.Off,
+            DryRunPolicy.HighRisk,
+            DryRunPolicy.AllWrites,
+        };
+
         private readonly VisualElement _root;
         private readonly UnitySkillsWindow _window;
 
@@ -55,6 +63,10 @@ namespace UnitySkills
         private Label         _confirmLabel;
         private Toggle        _confirmToggle;
         private Label         _confirmHint;
+        private Label         _dryRunPolicyLabel;
+        private DropdownField _dryRunPolicyDropdown;
+        private Label         _dryRunPolicyHint;
+        private Label         _dryRunPolicyExplain;
         private VisualElement _pendingSection;
         private Label         _pendingTitle;
         private VisualElement _pendingList;
@@ -84,6 +96,8 @@ namespace UnitySkills
         private Label  _agentSyncGroupTitle;
         private Toggle _agentAutoSyncToggle;
         private Label  _agentAutoSyncHint;
+        private Toggle _agentInstructionToggle;
+        private Label  _agentInstructionHint;
 
 
 
@@ -107,13 +121,14 @@ namespace UnitySkills
         private Label         _runtimeGroupTitle;
         private Label         _loglevelLabel;
         private DropdownField _logDropdown;
-        private VisualElement _updateNotificationsSwitch;
+        private Toggle        _updateNotificationsToggle;
         private Label         _updateNotificationsLabel;
         private Label         _updateNotificationsHint;
         private Label         _updateCheckLabel;
         private Button        _updateCheckBtn;
+        private Label         _updateModeHint;
         private Label         _updateCheckStatus;
-        private VisualElement _telemetrySwitch;
+        private Toggle        _telemetryToggle;
         private Label         _telemetryLabel;
         private Label         _telemetryHint;
         // Stats group
@@ -169,6 +184,7 @@ namespace UnitySkills
             SkillsModeManager.OnChanged -= RefreshPermissionsUi;
             TabVisibilitySettings.OnChanged -= SyncTabVisibilityUi;
             SkillTelemetryService.OnChanged -= SyncTabVisibilityUi;
+            DryRunPolicyService.OnChanged -= RefreshDryRunPolicyUi;
             VersionCheckService.CheckCompleted -= OnStableCheckCompleted;
         }
 
@@ -201,6 +217,10 @@ namespace UnitySkills
             _confirmLabel        = _drawerContainer.Q<Label>("confirm-label");
             _confirmToggle       = _drawerContainer.Q<Toggle>("confirm-toggle");
             _confirmHint         = _drawerContainer.Q<Label>("confirm-hint");
+            _dryRunPolicyLabel    = _drawerContainer.Q<Label>("dryrun-policy-label");
+            _dryRunPolicyDropdown = _drawerContainer.Q<DropdownField>("dryrun-policy-dropdown");
+            _dryRunPolicyHint     = _drawerContainer.Q<Label>("dryrun-policy-hint");
+            _dryRunPolicyExplain  = _drawerContainer.Q<Label>("dryrun-policy-explain");
             _pendingSection      = _drawerContainer.Q<VisualElement>("perm-pending-section");
             _pendingTitle        = _drawerContainer.Q<Label>("perm-pending-title");
             _pendingList         = _drawerContainer.Q<VisualElement>("perm-pending-list");
@@ -229,6 +249,8 @@ namespace UnitySkills
             _agentSyncGroupTitle = _drawerContainer.Q<Label>("group-agent-sync-title");
             _agentAutoSyncToggle = _drawerContainer.Q<Toggle>("agent-autosync-toggle");
             _agentAutoSyncHint   = _drawerContainer.Q<Label>("agent-autosync-hint");
+            _agentInstructionToggle = _drawerContainer.Q<Toggle>("agent-instruction-toggle");
+            _agentInstructionHint   = _drawerContainer.Q<Label>("agent-instruction-hint");
 
             _serverGroupTitle = _drawerContainer.Q<Label>("group-server-title");
             _autoStartToggle  = _drawerContainer.Q<Toggle>("autostart-toggle");
@@ -248,13 +270,14 @@ namespace UnitySkills
             _runtimeGroupTitle = _drawerContainer.Q<Label>("group-runtime-title");
             _loglevelLabel     = _drawerContainer.Q<Label>("loglevel-label");
             _logDropdown       = _drawerContainer.Q<DropdownField>("loglevel-dropdown");
-            _updateNotificationsSwitch = _drawerContainer.Q<VisualElement>("update-notifications-switch");
+            _updateNotificationsToggle = _drawerContainer.Q<Toggle>("update-notifications-toggle");
             _updateNotificationsLabel  = _drawerContainer.Q<Label>("update-notifications-label");
             _updateNotificationsHint   = _drawerContainer.Q<Label>("update-notifications-hint");
             _updateCheckLabel  = _drawerContainer.Q<Label>("update-check-label");
             _updateCheckBtn    = _drawerContainer.Q<Button>("update-check-btn");
+            _updateModeHint    = _drawerContainer.Q<Label>("update-mode-hint");
             _updateCheckStatus = _drawerContainer.Q<Label>("update-check-status");
-            _telemetrySwitch   = _drawerContainer.Q<VisualElement>("telemetry-switch");
+            _telemetryToggle   = _drawerContainer.Q<Toggle>("telemetry-toggle");
             _telemetryLabel    = _drawerContainer.Q<Label>("telemetry-label");
             _telemetryHint     = _drawerContainer.Q<Label>("telemetry-hint");
             _statsGroupTitle = _drawerContainer.Q<Label>("group-stats-title");
@@ -293,6 +316,9 @@ namespace UnitySkills
                     ConfirmationTokenService.RequireConfirmation = evt.newValue;
                 });
 
+            if (_dryRunPolicyDropdown != null)
+                _dryRunPolicyDropdown.RegisterValueChangedCallback(evt => ApplyDryRunPolicyChoice(evt.newValue));
+
             if (_tabVisibleSkillsToggle != null)
                 _tabVisibleSkillsToggle.RegisterValueChangedCallback(evt => TabVisibilitySettings.SetUserPreference("skills", evt.newValue));
             if (_tabVisibleAiConfigToggle != null)
@@ -307,6 +333,7 @@ namespace UnitySkills
             SkillsModeManager.OnChanged += RefreshPermissionsUi;
             TabVisibilitySettings.OnChanged += SyncTabVisibilityUi;
             SkillTelemetryService.OnChanged += SyncTabVisibilityUi;
+            DryRunPolicyService.OnChanged += RefreshDryRunPolicyUi;
 
             if (_allowlistClearBtn != null)
                 _allowlistClearBtn.clicked += () => SkillsModeManager.ClearAllowlist();
@@ -322,6 +349,20 @@ namespace UnitySkills
                 {
                     if (evt.newValue != SkillInstallSyncService.Enabled)
                         SkillInstallSyncService.Enabled = evt.newValue;
+                });
+
+            // Guide-line toggle: enabling writes the line to every installed tool right away,
+            // disabling removes it from every known instruction file again.
+            if (_agentInstructionToggle != null)
+                _agentInstructionToggle.RegisterValueChangedCallback(evt =>
+                {
+                    if (evt.newValue == AgentInstructionService.Enabled)
+                        return;
+                    AgentInstructionService.Enabled = evt.newValue;
+                    if (evt.newValue)
+                        AgentInstructionService.ApplyToAllInstalled();
+                    else
+                        AgentInstructionService.RemoveAll();
                 });
 
 
@@ -371,21 +412,20 @@ namespace UnitySkills
                         SkillsLogger.Level = (LogLevel)idx;
                 });
 
-            if (_updateNotificationsSwitch != null)
-                _updateNotificationsSwitch.RegisterCallback<ClickEvent>(_ =>
+            if (_updateNotificationsToggle != null)
+                _updateNotificationsToggle.RegisterValueChangedCallback(evt =>
                 {
-                    VersionCheckService.NotificationsEnabled =
-                        !VersionCheckService.NotificationsEnabled;
+                    VersionCheckService.NotificationsEnabled = evt.newValue;
                     SyncSettingSwitches();
                 });
 
             if (_updateCheckBtn != null)
                 _updateCheckBtn.clicked += OnUpdateCheckClicked;
 
-            if (_telemetrySwitch != null)
-                _telemetrySwitch.RegisterCallback<ClickEvent>(_ =>
+            if (_telemetryToggle != null)
+                _telemetryToggle.RegisterValueChangedCallback(evt =>
                 {
-                    SkillTelemetryService.Enabled = !SkillTelemetryService.Enabled;
+                    SkillTelemetryService.Enabled = evt.newValue;
                     SyncSettingSwitches();
                     TabVisibilitySettings.NotifyChanged();
                 });
@@ -445,6 +485,7 @@ namespace UnitySkills
             if (_autoStartToggle != null) _autoStartToggle.value = SkillsHttpServer.AutoStart;
             if (_startOnLaunchToggle != null) _startOnLaunchToggle.value = SkillsHttpServer.StartOnEditorLaunch;
             if (_agentAutoSyncToggle != null) _agentAutoSyncToggle.value = SkillInstallSyncService.Enabled;
+            if (_agentInstructionToggle != null) _agentInstructionToggle.value = AgentInstructionService.Enabled;
             if (_timeoutField   != null) _timeoutField.value     = SkillsHttpServer.RequestTimeoutMinutes;
             if (_keepaliveField != null) _keepaliveField.value   = SkillsHttpServer.KeepAliveIntervalSeconds;
             SyncSettingSwitches();
@@ -547,6 +588,18 @@ namespace UnitySkills
                 _panelApprovalHint.text = SkillsLocalization.Get("perm_require_panel_approval_hint");
             if (_confirmLabel != null) _confirmLabel.text = SkillsLocalization.Get("drawer_confirm_label");
             if (_confirmHint != null) _confirmHint.text = SkillsLocalization.Get("drawer_confirm_hint");
+            if (_dryRunPolicyLabel != null) _dryRunPolicyLabel.text = SkillsLocalization.Get("dryrun_policy_label");
+            if (_dryRunPolicyDropdown != null)
+            {
+                _dryRunPolicyDropdown.choices = new List<string>
+                {
+                    SkillsLocalization.Get("dryrun_policy_off"),
+                    SkillsLocalization.Get("dryrun_policy_high_risk"),
+                    SkillsLocalization.Get("dryrun_policy_all_writes"),
+                };
+            }
+            RefreshDryRunPolicyUi();
+            if (_dryRunPolicyExplain != null) _dryRunPolicyExplain.text = SkillsLocalization.Get("dryrun_policy_explain");
             if (_allowlistClearBtn != null) _allowlistClearBtn.text = SkillsLocalization.Get("perm_allowlist_clear_all");
             if (_allowlistAddBtn != null) _allowlistAddBtn.text = SkillsLocalization.Get("perm_add_skill_btn");
             if (_viewAuditBtn != null) _viewAuditBtn.text = SkillsLocalization.Get("perm_view_audit_log");
@@ -565,6 +618,10 @@ namespace UnitySkills
                 _agentAutoSyncToggle.label = SkillsLocalization.Get("agent_autosync_label");
             if (_agentAutoSyncHint != null)
                 _agentAutoSyncHint.text = SkillsLocalization.Get("agent_autosync_hint");
+            if (_agentInstructionToggle != null)
+                _agentInstructionToggle.label = SkillsLocalization.Get("agent_instruction_label");
+            if (_agentInstructionHint != null)
+                _agentInstructionHint.text = SkillsLocalization.Get("agent_instruction_hint");
 
 
 
@@ -595,12 +652,11 @@ namespace UnitySkills
 
             if (_updateCheckLabel != null)
                 _updateCheckLabel.text = SkillsLocalization.Get("drawer_update_check_label");
-            // Only re-apply button text in states whose text is static; Checking/Updating keep
-            // their transient status, and a language switch mid-update must not clobber it.
-            if (_updateCheckState == UpdateCheckState.Idle && _updateCheckBtn != null)
-                _updateCheckBtn.text = SkillsLocalization.Get("update_check_btn");
-            else if (_updateCheckState == UpdateCheckState.Ready && _updateCheckBtn != null)
-                _updateCheckBtn.text = SkillsLocalization.Get("update_check_update_now_fmt", _updateCheckTarget);
+            // Status and button text are stored as localization keys, not resolved strings, so both
+            // re-resolve here in every state -- including a check or update that is still in flight.
+            ApplyUpdateCheckButtonText();
+            ApplyUpdateCheckStatus();
+            ApplyUpdateModeHint();
 
             if (_telemetryLabel != null)
                 _telemetryLabel.text = SkillsLocalization.Get("drawer_telemetry_label");
@@ -632,9 +688,8 @@ namespace UnitySkills
 
         private void SyncSettingSwitches()
         {
-            _updateNotificationsSwitch?.EnableInClassList(
-                "on", VersionCheckService.NotificationsEnabled);
-            _telemetrySwitch?.EnableInClassList("on", SkillTelemetryService.Enabled);
+            _updateNotificationsToggle?.SetValueWithoutNotify(VersionCheckService.NotificationsEnabled);
+            _telemetryToggle?.SetValueWithoutNotify(SkillTelemetryService.Enabled);
         }
 
         // ===== Package update check (two-step: check first, then update on a second click) =====
@@ -644,7 +699,22 @@ namespace UnitySkills
         private UpdateCheckState _updateCheckState = UpdateCheckState.Idle;
         private PackageManagerHelper.SelfInstallKind _updateCheckKind;
         private string _updateCheckVersion; // raw latest stable version, null for beta targets
-        private string _updateCheckTarget = string.Empty; // display text for the update button
+
+        // Update target and status are held as localization keys (plus, where needed, a verbatim
+        // argument) instead of resolved text, so a language switch can re-resolve both. Storing the
+        // resolved string here is what used to freeze this row in whichever language was active when
+        // the check ran.
+        private string _updateCheckTargetKey;     // key for a localized target, e.g. the beta head
+        private string _updateCheckTargetLiteral; // verbatim target, e.g. "v2.8.2"
+        private string _updateCheckStatusKey;     // null while no status line is shown
+        private string _updateCheckStatusArgKey;  // {0} resolved from another key
+        private string _updateCheckStatusArgText; // {0} taken verbatim (upstream Package Manager text)
+        private string _updateModeHintKey;        // null hides the update-method line
+        private string _updateModeHintArg;        // branch or tag of a git clone, verbatim
+
+        private string UpdateCheckTargetText => _updateCheckTargetKey != null
+            ? SkillsLocalization.Get(_updateCheckTargetKey)
+            : _updateCheckTargetLiteral ?? string.Empty;
 
         private void OnUpdateCheckClicked()
         {
@@ -665,17 +735,23 @@ namespace UnitySkills
             _updateCheckKind = PackageManagerHelper.DetectSelfInstallKind();
             if (_updateCheckKind == PackageManagerHelper.SelfInstallKind.Unsupported)
             {
-                SetUpdateCheckStatus(SkillsLocalization.Get("update_check_unsupported"));
+                SetUpdateCheckStatus("update_check_unsupported");
                 return;
             }
 
             _updateCheckState = UpdateCheckState.Checking;
             _updateCheckBtn?.SetEnabled(false);
-            SetUpdateCheckStatus(SkillsLocalization.Get("update_check_checking"));
+            SetUpdateCheckStatus("update_check_checking");
 
             if (_updateCheckKind == PackageManagerHelper.SelfInstallKind.Beta)
             {
                 VersionCheckService.FetchBetaHeadSha(OnBetaHeadFetched);
+            }
+            else if (_updateCheckKind == PackageManagerHelper.SelfInstallKind.Local)
+            {
+                // A git clone compares commits with its official branch; comparing release numbers would call a beta
+                // clone up to date forever, or downgrade it to the stable archive.
+                LocalSelfUpdateService.Check(OnLocalCheckCompleted);
             }
             else
             {
@@ -696,12 +772,79 @@ namespace UnitySkills
             {
                 // Manual checks ignore the dismissed banner version on purpose.
                 _updateCheckVersion = release.Version;
-                EnterReadyState("v" + release.Version);
+                EnterReadyState(null, "v" + release.Version);
             }
             else
             {
-                EnterIdleState(SkillsLocalization.Get("update_check_latest"));
+                EnterIdleState("update_check_latest");
             }
+        }
+
+        private void OnLocalCheckCompleted(LocalUpdateResult result)
+        {
+            if (_updateCheckState != UpdateCheckState.Checking) return;
+
+            SetUpdateModeHint(result.Probe);
+            switch (result.Outcome)
+            {
+                case LocalUpdateOutcome.UpdateAvailable:
+                    // Git targets are language-neutral literals ("main @ 1a2b3c4", "v2.9.0"); Start ignores the version.
+                    _updateCheckVersion = null;
+                    EnterReadyState(null, result.TargetLabel);
+                    break;
+                case LocalUpdateOutcome.AlreadyUpToDate:
+                    EnterIdleState("update_check_latest");
+                    break;
+                case LocalUpdateOutcome.ReleaseCheckRequired:
+                    VersionCheckService.CheckCompleted += OnStableCheckCompleted;
+                    VersionCheckService.StartCheck(force: true);
+                    break;
+                default:
+                    // Checking only reports; the dialogs belong to an actual update attempt.
+                    EnterIdleState("update_check_failed_fmt", argKey: SelfUpdateFeedback.ReasonKey(result.Outcome));
+                    break;
+            }
+        }
+
+        private void OnLocalUpdateCompleted(LocalUpdateResult result)
+        {
+            if (_updateCheckState != UpdateCheckState.Updating) return;
+
+            if (result.Probe != null) SetUpdateModeHint(result.Probe);
+            switch (result.Outcome)
+            {
+                case LocalUpdateOutcome.Updated:
+                    // The package change triggers a domain reload that tears this UI down anyway.
+                    SetUpdateCheckStatus(SelfUpdateFeedback.DoneStatusKey(result, out var backupPath), argText: backupPath);
+                    break;
+                case LocalUpdateOutcome.AlreadyUpToDate:
+                    EnterIdleState("update_check_latest");
+                    break;
+                case LocalUpdateOutcome.Cancelled:
+                    EnterIdleState("update_check_cancelled");
+                    break;
+                default:
+                    EnterIdleState("update_check_failed_fmt", argKey: SelfUpdateFeedback.ReasonKey(result.Outcome));
+                    SelfUpdateFeedback.ShowRefusalDialog(result);
+                    break;
+            }
+        }
+
+        private void SetUpdateModeHint(LocalUpdateProbe probe)
+        {
+            _updateModeHintKey = SelfUpdateFeedback.ModeHintKey(probe, out _updateModeHintArg);
+            ApplyUpdateModeHint();
+        }
+
+        private void ApplyUpdateModeHint()
+        {
+            if (_updateModeHint == null) return;
+            _updateModeHint.SetVisible(_updateModeHintKey != null);
+            _updateModeHint.text = _updateModeHintKey == null
+                ? string.Empty
+                : _updateModeHintArg == null
+                    ? SkillsLocalization.Get(_updateModeHintKey)
+                    : SkillsLocalization.Get(_updateModeHintKey, _updateModeHintArg);
         }
 
         private void OnBetaHeadFetched(string sha)
@@ -710,8 +853,7 @@ namespace UnitySkills
 
             if (sha == null)
             {
-                EnterIdleState(SkillsLocalization.Get("update_check_failed_fmt",
-                    SkillsLocalization.Get("update_check_reason_network")));
+                EnterIdleState("update_check_failed_fmt", argKey: "update_check_reason_network");
                 return;
             }
 
@@ -722,11 +864,11 @@ namespace UnitySkills
             if (hasUpdate)
             {
                 _updateCheckVersion = null;
-                EnterReadyState(SkillsLocalization.Get("update_check_beta_target"));
+                EnterReadyState("update_check_beta_target", null);
             }
             else
             {
-                EnterIdleState(SkillsLocalization.Get("update_check_latest"));
+                EnterIdleState("update_check_latest");
             }
         }
 
@@ -734,7 +876,15 @@ namespace UnitySkills
         {
             _updateCheckState = UpdateCheckState.Updating;
             _updateCheckBtn?.SetEnabled(false);
-            SetUpdateCheckStatus(SkillsLocalization.Get("update_check_updating"));
+            SetUpdateCheckStatus("update_check_updating");
+
+            if (_updateCheckKind == PackageManagerHelper.SelfInstallKind.Local)
+            {
+                // Local (file:/embedded) installs update on disk -- a git clone fast-forwards, anything else swaps in
+                // the release archive -- instead of asking the Package Manager to rewrite the manifest.
+                LocalSelfUpdateService.Start(_updateCheckVersion, OnLocalUpdateCompleted);
+                return;
+            }
 
             PackageManagerHelper.UpdateSelf(_updateCheckKind, _updateCheckVersion, (success, message) =>
             {
@@ -742,46 +892,91 @@ namespace UnitySkills
                 if (success)
                 {
                     // The package swap triggers a domain reload that tears this UI down anyway.
-                    SetUpdateCheckStatus(SkillsLocalization.Get("update_check_done"));
+                    SetUpdateCheckStatus("update_check_done");
                 }
                 else
                 {
-                    EnterIdleState(SkillsLocalization.Get("update_check_failed_fmt",
-                        string.IsNullOrEmpty(message)
-                            ? SkillsLocalization.Get("update_check_reason_unknown")
-                            : message));
+                    EnterIdleState("update_check_failed_fmt",
+                        argKey: ResolveFailureReasonKey(message),
+                        argText: message);
                 }
             });
         }
 
-        private void EnterReadyState(string targetDisplay)
+        /// <summary>
+        /// Maps the failure text from <see cref="PackageManagerHelper"/> to a localization key when it
+        /// is one of our own sentinels; returns null when the text is an upstream Package Manager
+        /// diagnostic, which is shown verbatim.
+        /// </summary>
+        private static string ResolveFailureReasonKey(string message)
+        {
+            if (string.IsNullOrEmpty(message)) return "update_check_reason_unknown";
+            if (message == PackageManagerHelper.BusyMessage) return "update_check_reason_busy";
+            if (message == PackageManagerHelper.UnknownErrorMessage) return "update_check_reason_unknown";
+            return null;
+        }
+
+        private void EnterReadyState(string targetKey, string targetLiteral)
         {
             _updateCheckState = UpdateCheckState.Ready;
-            _updateCheckTarget = targetDisplay;
-            SetUpdateCheckStatus(SkillsLocalization.Get("update_check_new_version_fmt", targetDisplay));
-            if (_updateCheckBtn != null)
-            {
-                _updateCheckBtn.text = SkillsLocalization.Get("update_check_update_now_fmt", targetDisplay);
-                _updateCheckBtn.SetEnabled(true);
-            }
+            _updateCheckTargetKey = targetKey;
+            _updateCheckTargetLiteral = targetLiteral;
+            SetUpdateCheckStatus("update_check_new_version_fmt");
+            ApplyUpdateCheckButtonText();
+            _updateCheckBtn?.SetEnabled(true);
         }
 
-        private void EnterIdleState(string statusText)
+        private void EnterIdleState(string statusKey, string argKey = null, string argText = null)
         {
             _updateCheckState = UpdateCheckState.Idle;
-            _updateCheckTarget = string.Empty;
-            SetUpdateCheckStatus(statusText);
-            if (_updateCheckBtn != null)
-            {
-                _updateCheckBtn.text = SkillsLocalization.Get("update_check_btn");
-                _updateCheckBtn.SetEnabled(true);
-            }
+            _updateCheckTargetKey = null;
+            _updateCheckTargetLiteral = null;
+            SetUpdateCheckStatus(statusKey, argKey, argText);
+            ApplyUpdateCheckButtonText();
+            _updateCheckBtn?.SetEnabled(true);
         }
 
-        private void SetUpdateCheckStatus(string text)
+        private void SetUpdateCheckStatus(string key, string argKey = null, string argText = null)
         {
-            if (_updateCheckStatus != null)
-                _updateCheckStatus.text = text;
+            _updateCheckStatusKey = key;
+            _updateCheckStatusArgKey = argKey;
+            _updateCheckStatusArgText = argText;
+            ApplyUpdateCheckStatus();
+        }
+
+        private void ApplyUpdateCheckStatus()
+        {
+            if (_updateCheckStatus == null) return;
+
+            if (string.IsNullOrEmpty(_updateCheckStatusKey))
+            {
+                _updateCheckStatus.text = string.Empty;
+                return;
+            }
+
+            // The "new version" status carries the update target as its argument, and that target may
+            // itself be a localized string, so re-read it here instead of trusting the value captured
+            // when the check ran.
+            var arg = _updateCheckStatusKey == "update_check_new_version_fmt"
+                ? UpdateCheckTargetText
+                : (_updateCheckStatusArgKey != null
+                    ? SkillsLocalization.Get(_updateCheckStatusArgKey)
+                    : _updateCheckStatusArgText);
+
+            _updateCheckStatus.text = arg == null
+                ? SkillsLocalization.Get(_updateCheckStatusKey)
+                : SkillsLocalization.Get(_updateCheckStatusKey, arg);
+        }
+
+        private void ApplyUpdateCheckButtonText()
+        {
+            if (_updateCheckBtn == null) return;
+
+            // Updating keeps the Ready label (the button is disabled meanwhile).
+            _updateCheckBtn.text =
+                _updateCheckState == UpdateCheckState.Ready || _updateCheckState == UpdateCheckState.Updating
+                    ? SkillsLocalization.Get("update_check_update_now_fmt", UpdateCheckTargetText)
+                    : SkillsLocalization.Get("update_check_btn");
         }
 
         private static SkillsLocalization.Language ParseLanguage(string value) =>
@@ -795,6 +990,38 @@ namespace UnitySkills
             int idx = Array.IndexOf(_modeOrder, mode);
             if (idx < 0 || idx >= _modeDropdown.choices.Count) return;
             _modeDropdown.SetValueWithoutNotify(_modeDropdown.choices[idx]);
+        }
+
+        // The index is looked up back into the enum via _dryRunPolicyOrder, not through the localized text.
+        private void ApplyDryRunPolicyChoice(string choice)
+        {
+            if (_dryRunPolicyDropdown == null) return;
+            int idx = _dryRunPolicyDropdown.choices.IndexOf(choice);
+            if (idx < 0 || idx >= _dryRunPolicyOrder.Length) return;
+            var target = _dryRunPolicyOrder[idx];
+            if (DryRunPolicyService.Current != target)
+                DryRunPolicyService.Current = target; // The setter raises OnChanged -> RefreshDryRunPolicyUi
+        }
+
+        private void RefreshDryRunPolicyUi()
+        {
+            var policy = DryRunPolicyService.Current;
+            int idx = Array.IndexOf(_dryRunPolicyOrder, policy);
+            if (_dryRunPolicyDropdown != null && idx >= 0 && idx < _dryRunPolicyDropdown.choices.Count)
+                _dryRunPolicyDropdown.SetValueWithoutNotify(_dryRunPolicyDropdown.choices[idx]);
+            if (_dryRunPolicyHint == null) return;
+            switch (policy)
+            {
+                case DryRunPolicy.HighRisk:
+                    _dryRunPolicyHint.text = SkillsLocalization.Get("dryrun_policy_high_risk_hint");
+                    break;
+                case DryRunPolicy.AllWrites:
+                    _dryRunPolicyHint.text = SkillsLocalization.Get("dryrun_policy_all_writes_hint");
+                    break;
+                default:
+                    _dryRunPolicyHint.text = SkillsLocalization.Get("dryrun_policy_off_hint");
+                    break;
+            }
         }
 
         private void ApplyModeHintText(SkillsOperatingMode mode)

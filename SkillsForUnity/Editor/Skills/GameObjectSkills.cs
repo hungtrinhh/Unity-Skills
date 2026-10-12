@@ -3,6 +3,7 @@ using UnityEditor;
 using UnityEditorInternal;
 using System.Linq;
 using System.Collections.Generic;
+using Newtonsoft.Json.Linq;
 
 namespace UnitySkills
 {
@@ -12,64 +13,41 @@ namespace UnitySkills
     /// </summary>
     public static class GameObjectSkills
     {
-        [UnitySkill("gameobject_create_batch", "Create multiple GameObjects in one call (Efficient). items: JSON array of {name, primitiveType, x, y, z, parentName, parentInstanceId, parentPath}",
+        private const string TargetNameNote = "Exact name first (case-insensitive; with duplicates the pick is reported in resolutionNotes), else a unique whole-word or substring match; an ambiguous match is an error.";
+        private const string TargetPathNote = "Hierarchy path 'Parent/Child' (case-insensitive, scene-name prefix optional). Lookup order entityId > instanceId > path > name; a missed path falls back to name.";
+
+        [UnitySkill("gameobject_create_batch", "Create multiple GameObjects in one call (Efficient). items: JSON array of {name, primitiveType, x, y, z, rotX, rotY, rotZ, scaleX, scaleY, scaleZ, space, parentName, parentPath, parentInstanceId, parentEntityId}. space 'local' (default): x/y/z = localPosition, rot = localEulerAngles; 'world': world position/rotation applied after parenting; scale is always local. parentName/parentPath may name an item earlier in the same call (checked before the scene; the latest match wins). All-or-nothing: if any item fails nothing is created (rolledBack:true, the other items report reverted:true). Results read back position (world), localPosition, rotation (world euler), scale, path, parentPath.",
             Category = SkillCategory.GameObject, Operation = SkillOperation.Create,
             Tags = new[] { "primitive", "empty", "hierarchy", "batch" },
             Outputs = new[] { "totalItems", "successCount", "failCount", "results" },
             RequiresInput = new[] { "items" },
             TracksWorkflow = true, MutatesScene = true,
             RiskLevel = "medium")]
-        public static object GameObjectCreateBatch(string items)
+        public static object GameObjectCreateBatch(
+            [SkillParam("JSON array of {name, primitiveType?, x/y/z?, rotX/Y/Z?, scaleX/Y/Z? (default 1), space? (local|world), parentName|parentPath|parentInstanceId|parentEntityId?}.")]
+            string items)
         {
+            var created = new CreatedInCall();
             return BatchExecutor.Execute<BatchCreateItem>(items, item =>
             {
-                GameObject go;
-                string primitiveType = item.primitiveType;
+                // Everything that can reject the item runs before its object exists, so a failed item never leaves an orphan.
+                if (!TryParseSpace(item.space, out var worldSpace))
+                    return SkillParamUtil.InvalidValueError(item.space, "space", SpaceValues, item.name);
+                if (!TryResolvePrimitive(item.primitiveType, out var primitive, out var primitiveError))
+                    return new { error = primitiveError, parameter = "primitiveType", target = item.name };
 
-                // "Empty", "", or null all mean create an empty GameObject.
-                if (string.IsNullOrEmpty(primitiveType) ||
-                    primitiveType.Equals("Empty", System.StringComparison.OrdinalIgnoreCase) ||
-                    primitiveType.Equals("None", System.StringComparison.OrdinalIgnoreCase))
-                {
-                    go = new GameObject(item.name);
-                    primitiveType = null; // Normalized to null, for downstream metadata and workflow tracking.
-                }
-                else if (System.Enum.TryParse<PrimitiveType>(primitiveType, true, out var pt))
-                {
-                    go = GameObject.CreatePrimitive(pt);
-                    go.name = item.name;
-                }
-                else
-                {
-                    return new { error = $"Unknown primitive type: {primitiveType}" };
-                }
+                var (parentGo, parentError) = ResolveParent(item.parentName, item.parentInstanceId, item.parentPath, item.parentEntityId, created);
+                if (parentError != null)
+                    return ParentItemError(parentError, item.name);
 
-                if (!string.IsNullOrEmpty(item.parentEntityId) || !string.IsNullOrEmpty(item.parentName) || item.parentInstanceId != 0 || !string.IsNullOrEmpty(item.parentPath))
-                {
-                    var (parentGo, parentErr) = GameObjectFinder.FindOrError(item.parentName, item.parentInstanceId, item.parentPath, entityId: item.parentEntityId);
-                    if (parentErr != null) return new { error = $"Parent not found for '{item.name}'" };
-                    go.transform.SetParent(parentGo.transform, false);
-                }
-
-                go.transform.localPosition = new Vector3(item.x, item.y, item.z);
-                if (item.rotX != 0 || item.rotY != 0 || item.rotZ != 0)
-                    go.transform.eulerAngles = new Vector3(item.rotX, item.rotY, item.rotZ);
-                if (item.scaleX != 1 || item.scaleY != 1 || item.scaleZ != 1)
-                    go.transform.localScale = new Vector3(item.scaleX, item.scaleY, item.scaleZ);
-
-                Undo.RegisterCreatedObjectUndo(go, "Batch Create " + item.name);
-                WorkflowManager.SnapshotCreatedGameObject(go, primitiveType);
-
-                return new
-                {
-                    success = true,
-                    name = go.name,
-                    entityId = UnityObjectIdUtility.GetEntityId(go),
-                    instanceId = UnityObjectIdUtility.GetObjectId(go),
-                    path = GameObjectFinder.GetPath(go),
-                    position = new { x = item.x, y = item.y, z = item.z }
-                };
-            }, item => item.name);
+                var go = CreateConfigured(item.name, primitive, parentGo, worldSpace,
+                    new Vector3(item.x, item.y, item.z),
+                    new Vector3(item.rotX, item.rotY, item.rotZ),
+                    new Vector3(item.scaleX, item.scaleY, item.scaleZ),
+                    "Batch Create " + item.name);
+                created.Add(go);
+                return DescribeCreated(go);
+            }, item => item.name, atomic: true);
         }
 
         private class BatchCreateItem
@@ -85,13 +63,14 @@ namespace UnitySkills
             public float scaleX { get; set; } = 1;
             public float scaleY { get; set; } = 1;
             public float scaleZ { get; set; } = 1;
+            public string space { get; set; }
             public string parentName { get; set; }
             public string parentEntityId { get; set; }
             public int parentInstanceId { get; set; }
             public string parentPath { get; set; }
         }
 
-        [UnitySkill("gameobject_create", "Create a new GameObject. primitiveType: Cube, Sphere, Capsule, Cylinder, Plane, Quad, or Empty/null for empty object",
+        [UnitySkill("gameobject_create", "Create a new GameObject. primitiveType: Cube, Sphere, Capsule, Cylinder, Plane, Quad, or Empty/null for empty object. x/y/z and rotX/Y/Z are local to the parent unless space='world' (world position/rotation, applied after parenting); scaleX/Y/Z is localScale. Returns read-back position (world), localPosition, rotation (world euler), scale, path, parentPath.",
             Category = SkillCategory.GameObject, Operation = SkillOperation.Create,
             Tags = new[] { "primitive", "empty", "hierarchy" },
             // What's listed here must be keys the response actually carries. Writing "gameObject" is wrong —
@@ -99,48 +78,121 @@ namespace UnitySkills
             // planning off Outputs waiting on a field that never shows up.
             // Neither spelling affects chaining: the planner satisfies the "gameObject" token from
             // name/path/instanceId/entityId in the response, and never reads the literal from Outputs.
-            Outputs = new[] { "name", "entityId", "instanceId", "path", "parent", "position" },
+            Outputs = new[] { "name", "entityId", "instanceId", "path", "parent", "parentPath", "position", "localPosition", "rotation", "scale" },
             TracksWorkflow = true,
             MutatesScene = true, RiskLevel = "medium")]
-        public static object GameObjectCreate(string name, string primitiveType = null, float x = 0, float y = 0, float z = 0,
-            string parentName = null, int parentInstanceId = 0, string parentPath = null, string parentEntityId = null)
+        public static object GameObjectCreate(string name,
+            [SkillParam("Cube, Sphere, Capsule, Cylinder, Plane or Quad (case-insensitive); omit it, or pass Empty/None, for an empty GameObject.")]
+            string primitiveType = null,
+            [SkillParam("Position X, local to the parent unless space='world' (world when there is no parent).")]
+            float x = 0,
+            [SkillParam("Position Y, local to the parent unless space='world'.")]
+            float y = 0,
+            [SkillParam("Position Z, local to the parent unless space='world'.")]
+            float z = 0,
+            string parentName = null, int parentInstanceId = 0,
+            [SkillParam("Parent hierarchy path, e.g. 'World/Props'. Parent lookup order: parentEntityId > parentInstanceId > parentPath > parentName; omit all for a scene-root object.")]
+            string parentPath = null, string parentEntityId = null,
+            [SkillParam("rotX/rotY/rotZ: Euler angles in degrees, local to the parent unless space='world'.")]
+            float rotX = 0, float rotY = 0, float rotZ = 0,
+            [SkillParam("scaleX/scaleY/scaleZ: localScale; space does not apply to scale.")]
+            float scaleX = 1, float scaleY = 1, float scaleZ = 1,
+            [SkillParam("Coordinate space of x/y/z and rotX/rotY/rotZ: 'local' (default) = localPosition/localEulerAngles relative to the parent (same as world when there is no parent); 'world' = world position/rotation, applied after parenting. Scale is always localScale.")]
+            string space = "local")
         {
+            if (!TryParseSpace(space, out var worldSpace))
+                return SkillParamUtil.InvalidValueError(space, "space", SpaceValues);
+
             // Resolve the parent object first, so a bad parent path fails before the object is created.
-            GameObject parentGo = null;
-            if (!string.IsNullOrEmpty(parentEntityId) || !string.IsNullOrEmpty(parentName) || parentInstanceId != 0 || !string.IsNullOrEmpty(parentPath))
-            {
-                var (found, parentErr) = GameObjectFinder.FindOrError(parentName, parentInstanceId, parentPath, entityId: parentEntityId);
-                if (parentErr != null) return parentErr;
-                parentGo = found;
-            }
+            var (parentGo, parentErr) = ResolveParent(parentName, parentInstanceId, parentPath, parentEntityId, null);
+            if (parentErr != null) return parentErr;
 
-            GameObject go;
+            if (!TryResolvePrimitive(primitiveType, out var primitive, out var primitiveError))
+                return new { error = primitiveError };
 
-            // "Empty", "", or null all mean create an empty GameObject.
+            var go = CreateConfigured(name, primitive, parentGo, worldSpace,
+                new Vector3(x, y, z), new Vector3(rotX, rotY, rotZ), new Vector3(scaleX, scaleY, scaleZ), "Create " + name);
+            return DescribeCreated(go);
+        }
+
+        private static readonly string[] SpaceValues = { "local", "world" };
+
+        private static bool TryParseSpace(string space, out bool worldSpace)
+        {
+            worldSpace = false;
+            if (string.IsNullOrEmpty(space) || space.Equals("local", System.StringComparison.OrdinalIgnoreCase))
+                return true;
+            worldSpace = space.Equals("world", System.StringComparison.OrdinalIgnoreCase);
+            return worldSpace;
+        }
+
+        /// <summary>"Empty", "None", "" or null mean an empty GameObject (null primitive); anything else must name a PrimitiveType.</summary>
+        private static bool TryResolvePrimitive(string primitiveType, out PrimitiveType? primitive, out string error)
+        {
+            primitive = null;
+            error = null;
             if (string.IsNullOrEmpty(primitiveType) ||
                 primitiveType.Equals("Empty", System.StringComparison.OrdinalIgnoreCase) ||
                 primitiveType.Equals("None", System.StringComparison.OrdinalIgnoreCase))
+                return true;
+
+            if (System.Enum.TryParse<PrimitiveType>(primitiveType, true, out var parsed))
             {
-                go = new GameObject(name);
-                primitiveType = null; // Normalized to null, for downstream metadata and workflow tracking.
+                primitive = parsed;
+                return true;
             }
-            else if (System.Enum.TryParse<PrimitiveType>(primitiveType, true, out var pt))
+
+            error = $"Unknown primitive type: {primitiveType}. Use: Cube, Sphere, Capsule, Cylinder, Plane, Quad, or Empty/None for empty object";
+            return false;
+        }
+
+        /// <summary>
+        /// Creates, parents and places one GameObject, then registers it with Undo, the workflow and the finder cache.
+        /// Local space writes localPosition/localEulerAngles; world space writes position/eulerAngles after parenting,
+        /// so the parent's transform can't shift the requested world values. Scale is always localScale.
+        /// </summary>
+        private static GameObject CreateConfigured(string name, PrimitiveType? primitive, GameObject parent, bool worldSpace,
+            Vector3 position, Vector3 eulerAngles, Vector3 scale, string undoName)
+        {
+            GameObject go;
+            if (primitive.HasValue)
             {
-                go = GameObject.CreatePrimitive(pt);
+                go = GameObject.CreatePrimitive(primitive.Value);
                 go.name = name;
             }
             else
             {
-                return new { error = $"Unknown primitive type: {primitiveType}. Use: Cube, Sphere, Capsule, Cylinder, Plane, Quad, or Empty/None for empty object" };
+                go = new GameObject(name);
             }
 
-            if (parentGo != null)
-                go.transform.SetParent(parentGo.transform, false);
+            var t = go.transform;
+            if (parent != null)
+                t.SetParent(parent.transform, false);
 
-            go.transform.localPosition = new Vector3(x, y, z);
-            Undo.RegisterCreatedObjectUndo(go, "Create " + name);
-            WorkflowManager.SnapshotCreatedGameObject(go, primitiveType);
+            if (worldSpace)
+            {
+                t.position = position;
+                t.eulerAngles = eulerAngles;
+            }
+            else
+            {
+                t.localPosition = position;
+                t.localEulerAngles = eulerAngles;
+            }
+            t.localScale = scale;
 
+            Undo.RegisterCreatedObjectUndo(go, undoName);
+            // The canonical enum name, not the caller's spelling: redo rebuilds the primitive with a case-sensitive parse.
+            WorkflowManager.SnapshotCreatedGameObject(go, primitive?.ToString());
+            GameObjectFinder.RegisterCreated(go);
+            return go;
+        }
+
+        /// <summary>The created object's state read back from its Transform, with the same keys and spaces as gameobject_get_info.</summary>
+        private static object DescribeCreated(GameObject go)
+        {
+            var t = go.transform;
+            var parent = t.parent;
             return new
             {
                 success = true,
@@ -148,15 +200,130 @@ namespace UnitySkills
                 entityId = UnityObjectIdUtility.GetEntityId(go),
                 instanceId = UnityObjectIdUtility.GetObjectId(go),
                 path = GameObjectFinder.GetPath(go),
-                parent = parentGo != null ? parentGo.name : "(root)",
-                position = new { x, y, z }
+                parent = parent != null ? parent.name : "(root)",
+                parentPath = parent != null ? GameObjectFinder.GetPath(parent.gameObject) : null,
+                position = new { x = t.position.x, y = t.position.y, z = t.position.z },
+                localPosition = new { x = t.localPosition.x, y = t.localPosition.y, z = t.localPosition.z },
+                rotation = new { x = t.eulerAngles.x, y = t.eulerAngles.y, z = t.eulerAngles.z },
+                scale = new { x = t.localScale.x, y = t.localScale.y, z = t.localScale.z }
             };
         }
 
-        [UnitySkill("gameobject_rename", "Rename a GameObject (supports name/instanceId/path). Returns: {success, oldName, newName, instanceId}",
+        /// <summary>
+        /// Resolves a create's parent before anything exists. With <paramref name="created"/> (a batch), objects made by
+        /// earlier items win: parentPath is matched against their paths, then the scene; parentName against their names
+        /// (latest first), then the scene. entityId/instanceId are exact and go straight to the finder.
+        /// </summary>
+        private static (GameObject parent, object error) ResolveParent(string parentName, int parentInstanceId, string parentPath,
+            string parentEntityId, CreatedInCall created)
+        {
+            if (string.IsNullOrEmpty(parentEntityId) && string.IsNullOrEmpty(parentName) &&
+                parentInstanceId == 0 && string.IsNullOrEmpty(parentPath))
+                return (null, null);
+
+            if (created != null && string.IsNullOrEmpty(parentEntityId) && parentInstanceId == 0)
+            {
+                if (!string.IsNullOrEmpty(parentPath))
+                {
+                    var byPath = created.FindByPath(parentPath);
+                    if (byPath != null)
+                        return (byPath, null);
+                    if (GameObjectFinder.FindByPath(parentPath) != null)
+                        return GameObjectFinder.FindOrError(path: parentPath);
+                }
+
+                if (!string.IsNullOrEmpty(parentName))
+                {
+                    var byName = created.FindByName(parentName);
+                    if (byName != null)
+                    {
+                        if (!string.IsNullOrEmpty(parentPath))
+                            GameObjectFinder.AddResolutionNote($"path '{parentPath}' not found; resolved by name '{parentName}' instead (path: {GameObjectFinder.GetPath(byName)})");
+                        return (byName, null);
+                    }
+                }
+            }
+
+            return GameObjectFinder.FindOrError(parentName, parentInstanceId, parentPath, entityId: parentEntityId);
+        }
+
+        /// <summary>A batch item's parent failure, keeping the finder's code and candidates so the item says what to fix.</summary>
+        private static object ParentItemError(object finderError, string target)
+        {
+            SkillResultHelper.TryGetMemberValue(finderError, "error", out var message);
+            SkillResultHelper.TryGetMemberValue(finderError, "errorCode", out var errorCode);
+            SkillResultHelper.TryGetMemberValue(finderError, "suggestions", out var suggestions);
+            SkillResultHelper.TryGetMemberValue(finderError, "candidates", out var candidates);
+            return new
+            {
+                error = $"Parent of '{target}' could not be resolved: {message}",
+                errorCode,
+                parameter = "parent",
+                target,
+                suggestions,
+                candidates
+            };
+        }
+
+        /// <summary>
+        /// Objects made by earlier items of the current create call. A later item's parentPath / parentName resolves here
+        /// before the scene (the latest matching item wins), so one batch can build a hierarchy top-down; the planner
+        /// predicts the same precedence for dryRun.
+        /// </summary>
+        private sealed class CreatedInCall
+        {
+            private readonly List<GameObject> _objects = new List<GameObject>();
+
+            public void Add(GameObject go) => _objects.Add(go);
+
+            public GameObject FindByPath(string path)
+            {
+                var wanted = GameObjectFinder.NormalizePathKey(path);
+                if (wanted == null)
+                    return null;
+
+                for (int i = _objects.Count - 1; i >= 0; i--)
+                {
+                    var go = _objects[i];
+                    if (go == null)
+                        continue;
+                    var actual = GameObjectFinder.GetPath(go);
+                    if (actual.Equals(wanted, System.StringComparison.OrdinalIgnoreCase) ||
+                        (go.scene.name + "/" + actual).Equals(wanted, System.StringComparison.OrdinalIgnoreCase))
+                        return go;
+                }
+                return null;
+            }
+
+            public GameObject FindByName(string name)
+            {
+                GameObject match = null;
+                int count = 0;
+                for (int i = _objects.Count - 1; i >= 0; i--)
+                {
+                    var go = _objects[i];
+                    if (go == null || !go.name.Equals(name, System.StringComparison.OrdinalIgnoreCase))
+                        continue;
+                    count++;
+                    if (match == null)
+                        match = go;
+                }
+
+                if (match == null)
+                    return null;
+                if (!string.Equals(match.name, name, System.StringComparison.Ordinal))
+                    GameObjectFinder.AddResolutionNote($"parent name '{name}' matched '{match.name}' case-insensitively (created earlier in this call, path: {GameObjectFinder.GetPath(match)})");
+                if (count > 1)
+                    GameObjectFinder.AddResolutionNote($"parent name '{name}' matches {count} objects created earlier in this call; used the latest (path: {GameObjectFinder.GetPath(match)})");
+                return match;
+            }
+        }
+
+        [UnitySkill("gameobject_rename", "Rename a GameObject (supports name/instanceId/path). Returns, read back from the renamed object: {success, oldName, newName, entityId, instanceId, path}",
             Category = SkillCategory.GameObject, Operation = SkillOperation.Modify,
             Tags = new[] { "rename", "name", "identity" },
             Outputs = new[] { "oldName", "newName", "instanceId", "path" },
+            RequiredParams = new[] { "newName" },
             RequiresInput = new[] { "gameObject" },
             TracksWorkflow = true, MutatesScene = true)]
         public static object GameObjectRename(string name = null, int instanceId = 0, string path = null, string newName = null, string entityId = null)
@@ -187,7 +354,9 @@ namespace UnitySkills
             Outputs = new[] { "totalItems", "successCount", "failCount", "results" },
             RequiresInput = new[] { "items" },
             TracksWorkflow = true, MutatesScene = true)]
-        public static object GameObjectRenameBatch(string items)
+        public static object GameObjectRenameBatch(
+            [SkillParam("JSON array of {name|path|instanceId|entityId, newName}.")]
+            string items)
         {
             return BatchExecutor.Execute<BatchRenameItem>(items, item =>
             {
@@ -203,7 +372,7 @@ namespace UnitySkills
                 go.name = item.newName;
 
                 return new { success = true, oldName, newName = go.name, entityId = UnityObjectIdUtility.GetEntityId(go), instanceId = UnityObjectIdUtility.GetObjectId(go) };
-            }, item => item.name ?? item.path ?? item.entityId ?? item.instanceId.ToString());
+            }, item => item.name ?? item.path ?? item.entityId ?? item.instanceId.ToString(), atomic: true);
         }
 
         private class BatchRenameItem
@@ -222,7 +391,11 @@ namespace UnitySkills
             RequiresInput = new[] { "gameObject" },
             TracksWorkflow = true, SkipAutoPresnapshot = true,
             MutatesScene = true, RiskLevel = "medium")]
-        public static object GameObjectDelete(string name = null, int instanceId = 0, string path = null, string entityId = null)
+        public static object GameObjectDelete(
+            [SkillParam(TargetNameNote)] string name = null,
+            int instanceId = 0,
+            [SkillParam(TargetPathNote)] string path = null,
+            string entityId = null)
         {
             var (go, error) = GameObjectFinder.FindOrError(name, instanceId, path, entityId: entityId);
             if (error != null) return error;
@@ -241,7 +414,9 @@ namespace UnitySkills
             TracksWorkflow = true, SkipAutoPresnapshot = true,
             MutatesScene = true,
             RiskLevel = "medium")]
-        public static object GameObjectDeleteBatch(string items)
+        public static object GameObjectDeleteBatch(
+            [SkillParam("JSON array of names, or of {name|path|instanceId|entityId} objects; the two forms may be mixed.")]
+            string items)
         {
             if (Validate.RequiredJsonArray(items, "items") is object err) return err;
 
@@ -258,7 +433,7 @@ namespace UnitySkills
                     if (!WorkflowManager.DeleteSceneObject(go))
                         return new { error = "Failed to capture and delete object" };
                     return new { target = deletedName, success = true };
-                }, item => item.name ?? item.path ?? item.entityId ?? item.instanceId.ToString());
+                }, item => item.name ?? item.path ?? item.entityId ?? item.instanceId.ToString(), atomic: true);
             }
             catch (System.Exception ex)
             {
@@ -294,13 +469,73 @@ namespace UnitySkills
             Outputs = new[] { "count", "objects" },
             ReadOnly = true,
             Mode = SkillMode.SemiAuto)]
-        public static object GameObjectFind(string name = null, bool useRegex = false, string tag = null, string layer = null, string component = null, int limit = 50)
+        public static object GameObjectFind(
+            [SkillParam("Case-insensitive substring; with useRegex=true a case-sensitive .NET regex.")]
+            string name = null,
+            bool useRegex = false, string tag = null,
+            [SkillParam("Layer name as in Tags & Layers, not an index; an unknown name is rejected with the defined layers.")]
+            string layer = null,
+            [SkillParam("Component type name as in component_add; an unknown name is rejected.")]
+            string component = null, int limit = 50)
         {
             // A tag that isn't registered in TagManager makes GameObject.FindGameObjectsWithTag throw
             // UnityException, so this must be rejected at the entry point rather than letting that call
             // become an unhandled exception.
-            if (!string.IsNullOrEmpty(tag) && !IsTagDefined(tag))
+            if (!string.IsNullOrEmpty(tag) && !SkillsCommon.IsTagDefined(tag))
                 return SkillParamUtil.InvalidValueError(tag, "tag", InternalEditorUtility.tags);
+
+            // Same reasoning for layer/component (bugs.md B6): silently skipping an unresolvable
+            // filter used to return every object as if it matched, instead of the empty/narrow
+            // result the caller actually asked for.
+            if (!string.IsNullOrEmpty(layer) && LayerMask.NameToLayer(layer) < 0)
+            {
+                var layerError = JObject.FromObject(SkillParamUtil.InvalidValueError(layer, "layer", SkillsCommon.DefinedLayerNames()));
+                layerError["retryStrategy"] = SkillErrorResponse.RetryFixAndRetry;
+                return layerError;
+            }
+
+            System.Type compType = null;
+            if (!string.IsNullOrEmpty(component))
+            {
+                compType = ComponentSkills.FindComponentType(component);
+                if (compType == null)
+                {
+                    var similarTypes = ComponentSkills.GetSimilarTypes(component);
+                    var fixes = new List<object>();
+                    if (similarTypes.Length > 0)
+                        fixes.Add(new { action = "fix_param", args = new { component = similarTypes[0] }, reason = "Closest loaded component type." });
+                    fixes.Add(new { action = "fix_param", skill = "script_get_compile_feedback", reason = "A script class can only be used as a filter after it compiles." });
+                    return new
+                    {
+                        error = $"Invalid value '{component}' for parameter 'component': no loaded Component type has that name.",
+                        errorCode = SkillParamUtil.SemanticInvalidCode,
+                        retryStrategy = SkillErrorResponse.RetryFixAndRetry,
+                        parameter = "component",
+                        similarTypes,
+                        suggestedFixes = fixes.ToArray(),
+                    };
+                }
+            }
+
+            System.Text.RegularExpressions.Regex regex = null;
+            if (!string.IsNullOrEmpty(name) && useRegex)
+            {
+                try
+                {
+                    regex = new System.Text.RegularExpressions.Regex(name, System.Text.RegularExpressions.RegexOptions.None, System.TimeSpan.FromSeconds(1));
+                }
+                catch (System.ArgumentException ex)
+                {
+                    return new
+                    {
+                        error = $"Invalid value '{name}' for parameter 'name': not a valid .NET regular expression ({ex.Message}).",
+                        errorCode = SkillParamUtil.SemanticInvalidCode,
+                        retryStrategy = SkillErrorResponse.RetryFixAndRetry,
+                        parameter = "name",
+                        suggestedFixes = new object[] { new { action = "fix_param", args = new { useRegex = false }, reason = "Search for the literal text instead." } },
+                    };
+                }
+            }
 
             // If a tag is given, narrow the scope first with FindGameObjectsWithTag (faster); filtering continues below regardless.
             IEnumerable<GameObject> results;
@@ -312,38 +547,42 @@ namespace UnitySkills
             // Filter by name (regex or contains).
             if (!string.IsNullOrEmpty(name))
             {
-                if (useRegex)
-                {
-                    var regex = new System.Text.RegularExpressions.Regex(name, System.Text.RegularExpressions.RegexOptions.None, System.TimeSpan.FromSeconds(1));
-                    results = results.Where(go => regex.IsMatch(go.name));
-                }
-                else
-                {
-                    results = results.Where(go => go.name.IndexOf(name, System.StringComparison.OrdinalIgnoreCase) >= 0);
-                }
+                results = useRegex
+                    ? results.Where(go => regex.IsMatch(go.name))
+                    : results.Where(go => go.name.IndexOf(name, System.StringComparison.OrdinalIgnoreCase) >= 0);
             }
-            
+
             // Re-check the tag again, in case the earlier path took the fallback branch.
             if (!string.IsNullOrEmpty(tag))
                 results = results.Where(go => go.CompareTag(tag));
-                
+
             if (!string.IsNullOrEmpty(layer))
             {
                 int layerId = LayerMask.NameToLayer(layer);
-                if (layerId != -1)
-                    results = results.Where(go => go.layer == layerId);
+                results = results.Where(go => go.layer == layerId);
             }
 
             // Filter by component type.
-            if (!string.IsNullOrEmpty(component))
+            if (compType != null)
+                results = results.Where(go => go.GetComponent(compType) != null);
+
+            GameObject[] materialized;
+            try
             {
-                var compType = ComponentSkills.FindComponentType(component);
-                
-                if (compType != null)
-                    results = results.Where(go => go.GetComponent(compType) != null);
+                materialized = results.Take(limit).ToArray();
+            }
+            catch (System.Text.RegularExpressions.RegexMatchTimeoutException)
+            {
+                return new
+                {
+                    error = $"Invalid value '{name}' for parameter 'name': regular expression timed out after 1 s; simplify the pattern.",
+                    errorCode = SkillParamUtil.SemanticInvalidCode,
+                    retryStrategy = SkillErrorResponse.RetryFixAndRetry,
+                    parameter = "name",
+                };
             }
 
-            var list = results.Take(limit).Select(go => new
+            var list = materialized.Select(go => new
             {
                 name = go.name,
                 entityId = UnityObjectIdUtility.GetEntityId(go),
@@ -357,26 +596,37 @@ namespace UnitySkills
             return new { count = list.Length, objects = list };
         }
 
-        [UnitySkill("gameobject_set_transform", "Set transform properties. For UI/RectTransform: use anchorX/Y, pivotX/Y, sizeDeltaX/Y. For 3D: use posX/Y/Z, rotX/Y/Z, scaleX/Y/Z",
+        [UnitySkill("gameobject_set_transform", "Set transform properties (supports name/instanceId/path). posX/Y/Z = world position, rotX/Y/Z = world euler angles, scaleX/Y/Z = localScale, localPosX/Y/Z = local position (applied after posX/Y/Z, so it wins on the same axis); omitted axes keep their current value. UI/RectTransform also takes anchoredPosX/Y, anchorMinX/Y, anchorMaxX/Y, pivotX/Y, sizeDeltaX/Y, width/height. Returns the read-back position (world), localPosition, rotation (world euler) and scale (local), plus the RectTransform values for UI.",
             Category = SkillCategory.GameObject, Operation = SkillOperation.Modify,
             Tags = new[] { "transform", "position", "rotation", "scale", "rectTransform" },
             Outputs = new[] { "instanceId", "position", "rotation", "scale" },
             RequiresInput = new[] { "gameObject" },
             TracksWorkflow = true, MutatesScene = true)]
         public static object GameObjectSetTransform(
-            string name = null, int instanceId = 0, string path = null,
+            [SkillParam(TargetNameNote)] string name = null,
+            int instanceId = 0,
+            [SkillParam(TargetPathNote)] string path = null,
             // World transform (3D objects)
+            [SkillParam("posX/posY/posZ: world position; omitted axes keep their value. localPosX/Y/Z are applied after and win on the same axis.")]
             float? posX = null, float? posY = null, float? posZ = null,
+            [SkillParam("rotX/rotY/rotZ: world Euler angles in degrees (transform.eulerAngles); omitted axes keep their value.")]
             float? rotX = null, float? rotY = null, float? rotZ = null,
+            [SkillParam("scaleX/scaleY/scaleZ: localScale (relative to the parent, not world scale).")]
             float? scaleX = null, float? scaleY = null, float? scaleZ = null,
             // Local transform (shared by 3D and UI)
+            [SkillParam("localPosX/Y/Z: position relative to the parent, applied after posX/Y/Z so it wins on the same axis.")]
             float? localPosX = null, float? localPosY = null, float? localPosZ = null,
             // RectTransform-specific (UI)
+            [SkillParam("RectTransform only (ignored on non-UI objects): anchoredPosition X/Y, the pivot's offset from the anchor reference point.")]
             float? anchoredPosX = null, float? anchoredPosY = null,
+            [SkillParam("RectTransform only: anchorMinX/Y and anchorMaxX/Y are 0-1 fractions of the parent rect.")]
             float? anchorMinX = null, float? anchorMinY = null,
             float? anchorMaxX = null, float? anchorMaxY = null,
+            [SkillParam("RectTransform only: pivotX/Y are 0-1 fractions of the object's own rect (0.5 = centre).")]
             float? pivotX = null, float? pivotY = null,
+            [SkillParam("RectTransform only: sizeDeltaX/Y = size relative to the distance between the anchors (equals the size when the anchors coincide).")]
             float? sizeDeltaX = null, float? sizeDeltaY = null,
+            [SkillParam("RectTransform only: width/height set the rect size for the current anchors, applied after sizeDeltaX/Y.")]
             float? width = null, float? height = null,
             string entityId = null)
         {
@@ -434,7 +684,10 @@ namespace UnitySkills
                     pivot = new { x = rt.pivot.x, y = rt.pivot.y },
                     sizeDelta = new { x = rt.sizeDelta.x, y = rt.sizeDelta.y },
                     rect = new { width = rt.rect.width, height = rt.rect.height },
-                    localPosition = new { x = go.transform.localPosition.x, y = go.transform.localPosition.y, z = go.transform.localPosition.z }
+                    localPosition = new { x = go.transform.localPosition.x, y = go.transform.localPosition.y, z = go.transform.localPosition.z },
+                    position = new { x = go.transform.position.x, y = go.transform.position.y, z = go.transform.position.z },
+                    rotation = new { x = go.transform.eulerAngles.x, y = go.transform.eulerAngles.y, z = go.transform.eulerAngles.z },
+                    scale = new { x = go.transform.localScale.x, y = go.transform.localScale.y, z = go.transform.localScale.z }
                 };
             }
 
@@ -452,7 +705,7 @@ namespace UnitySkills
             };
         }
 
-        [UnitySkill("gameobject_set_transform_batch", "Set transform properties for multiple objects (Efficient). items: JSON array of {name, instanceId, path, entityId, posX/Y/Z, rotX/Y/Z, scaleX/Y/Z, localPosX/Y/Z, anchoredPosX/Y, anchorMinX/Y, anchorMaxX/Y, pivotX/Y, sizeDeltaX/Y, width, height}",
+        [UnitySkill("gameobject_set_transform_batch", "Set transform properties for multiple objects (Efficient). items: JSON array of {name, instanceId, path, entityId, posX/Y/Z, rotX/Y/Z, scaleX/Y/Z, localPosX/Y/Z, anchoredPosX/Y, anchorMinX/Y, anchorMaxX/Y, pivotX/Y, sizeDeltaX/Y, width, height}, with the same spaces as gameobject_set_transform (pos/rot world, scale local, localPos wins on the same axis). If any item fails the whole call is rolled back (rolledBack:true, the other items report reverted:true). Each result reads back position (world; legacy alias pos), localPosition, rotation and scale.",
             Category = SkillCategory.GameObject, Operation = SkillOperation.Modify,
             Tags = new[] { "transform", "position", "rotation", "scale", "batch" },
             // Only list the outer envelope's keys, echoed per item inside results[]. Declaring entityId
@@ -460,7 +713,9 @@ namespace UnitySkills
             Outputs = new[] { "totalItems", "successCount", "failCount", "results" },
             RequiresInput = new[] { "items" },
             TracksWorkflow = true, MutatesScene = true)]
-        public static object GameObjectSetTransformBatch(string items)
+        public static object GameObjectSetTransformBatch(
+            [SkillParam("JSON array of {name|path|instanceId|entityId, posX/Y/Z?, rotX/Y/Z?, scaleX/Y/Z?, localPosX/Y/Z?, anchoredPosX/Y?, anchorMinX/Y?, anchorMaxX/Y?, pivotX/Y?, sizeDeltaX/Y?, width?, height?}.")]
+            string items)
         {
             return BatchExecutor.Execute<BatchTransformItem>(items, item =>
             {
@@ -502,13 +757,15 @@ namespace UnitySkills
                     EditorUtility.SetDirty(rt);
 
                     // Echo back every field this call can write, matching gameobject_set_transform's two response shapes.
-                    // pos is a legacy field name, kept as-is.
+                    // pos is the legacy name of position (world), kept for existing callers.
                     return new
                     {
                         success = true,
                         name = go.name,
                         entityId = UnityObjectIdUtility.GetEntityId(go),
+                        instanceId = UnityObjectIdUtility.GetObjectId(go),
                         isUI = true,
+                        position = new { x = go.transform.position.x, y = go.transform.position.y, z = go.transform.position.z },
                         pos = new { x = go.transform.position.x, y = go.transform.position.y, z = go.transform.position.z },
                         localPosition = new { x = go.transform.localPosition.x, y = go.transform.localPosition.y, z = go.transform.localPosition.z },
                         rotation = new { x = go.transform.eulerAngles.x, y = go.transform.eulerAngles.y, z = go.transform.eulerAngles.z },
@@ -527,13 +784,15 @@ namespace UnitySkills
                     success = true,
                     name = go.name,
                     entityId = UnityObjectIdUtility.GetEntityId(go),
+                    instanceId = UnityObjectIdUtility.GetObjectId(go),
                     isUI = false,
+                    position = new { x = go.transform.position.x, y = go.transform.position.y, z = go.transform.position.z },
                     pos = new { x = go.transform.position.x, y = go.transform.position.y, z = go.transform.position.z },
                     localPosition = new { x = go.transform.localPosition.x, y = go.transform.localPosition.y, z = go.transform.localPosition.z },
                     rotation = new { x = go.transform.eulerAngles.x, y = go.transform.eulerAngles.y, z = go.transform.eulerAngles.z },
                     scale = new { x = go.transform.localScale.x, y = go.transform.localScale.y, z = go.transform.localScale.z }
                 };
-            }, item => item.name ?? item.path ?? item.entityId);
+            }, item => item.name ?? item.path ?? item.entityId, atomic: true);
         }
 
         private class BatchTransformItem
@@ -588,10 +847,10 @@ namespace UnitySkills
             return true;
         }
 
-        [UnitySkill("gameobject_duplicate", "Duplicate a GameObject (supports name/instanceId/path). Returns: originalName, copyName, copyInstanceId, copyPath",
+        [UnitySkill("gameobject_duplicate", "Duplicate a GameObject (supports name/instanceId/path) as a sibling named <name>_Copy. Returns, read back from the copy: originalName, copyName, copyEntityId, copyInstanceId, copyPath, copyParentPath",
             Category = SkillCategory.GameObject, Operation = SkillOperation.Create,
             Tags = new[] { "duplicate", "copy", "clone", "hierarchy" },
-            Outputs = new[] { "copyName", "copyInstanceId", "copyPath" },
+            Outputs = new[] { "copyName", "copyInstanceId", "copyPath", "copyParentPath" },
             RequiresInput = new[] { "gameObject" },
             TracksWorkflow = true, MutatesScene = true)]
         public static object GameObjectDuplicate(string name = null, int instanceId = 0, string path = null, string entityId = null)
@@ -603,24 +862,35 @@ namespace UnitySkills
             copy.name = go.name + "_Copy";
             Undo.RegisterCreatedObjectUndo(copy, "Duplicate " + go.name);
             WorkflowManager.SnapshotObject(copy, SnapshotType.Created);
+            GameObjectFinder.RegisterCreated(copy);
 
-            return new {
+            return DescribeCopy(go, copy);
+        }
+
+        /// <summary>The copy's identity read back from the new object, including where it landed in the hierarchy.</summary>
+        private static object DescribeCopy(GameObject original, GameObject copy)
+        {
+            return new
+            {
                 success = true,
-                originalName = go.name,
+                originalName = original.name,
                 copyName = copy.name,
                 copyEntityId = UnityObjectIdUtility.GetEntityId(copy),
                 copyInstanceId = UnityObjectIdUtility.GetObjectId(copy),
-                copyPath = GameObjectFinder.GetPath(copy)
+                copyPath = GameObjectFinder.GetPath(copy),
+                copyParentPath = copy.transform.parent != null ? GameObjectFinder.GetPath(copy.transform.parent.gameObject) : null
             };
         }
 
-        [UnitySkill("gameobject_duplicate_batch", "Duplicate multiple GameObjects in one call (Efficient). items: JSON array of {name, instanceId, path}. Returns array with originalName, copyName, copyInstanceId for each.",
+        [UnitySkill("gameobject_duplicate_batch", "Duplicate multiple GameObjects in one call (Efficient). items: JSON array of {name, instanceId, path, entityId}. Each result carries originalName, copyName, copyEntityId, copyInstanceId, copyPath, copyParentPath; if any item fails the whole call is rolled back (rolledBack:true, the other items report reverted:true).",
             Category = SkillCategory.GameObject, Operation = SkillOperation.Create,
             Tags = new[] { "duplicate", "copy", "clone", "hierarchy", "batch" },
             Outputs = new[] { "totalItems", "successCount", "failCount", "results" },
             RequiresInput = new[] { "items" },
             TracksWorkflow = true, MutatesScene = true)]
-        public static object GameObjectDuplicateBatch(string items)
+        public static object GameObjectDuplicateBatch(
+            [SkillParam("JSON array of {name|path|instanceId|entityId}.")]
+            string items)
         {
             return BatchExecutor.Execute<BatchDuplicateItem>(items, item =>
             {
@@ -631,17 +901,10 @@ namespace UnitySkills
                 copy.name = go.name + "_Copy";
                 Undo.RegisterCreatedObjectUndo(copy, "Batch Duplicate " + go.name);
                 WorkflowManager.SnapshotObject(copy, SnapshotType.Created);
+                GameObjectFinder.RegisterCreated(copy);
 
-                return new
-                {
-                    success = true,
-                    originalName = go.name,
-                    copyName = copy.name,
-                    copyEntityId = UnityObjectIdUtility.GetEntityId(copy),
-                    copyInstanceId = UnityObjectIdUtility.GetObjectId(copy),
-                    copyPath = GameObjectFinder.GetPath(copy)
-                };
-            }, item => item.name ?? item.path ?? item.entityId ?? item.instanceId.ToString());
+                return DescribeCopy(go, copy);
+            }, item => item.name ?? item.path ?? item.entityId ?? item.instanceId.ToString(), atomic: true);
         }
 
         private class BatchDuplicateItem
@@ -655,32 +918,107 @@ namespace UnitySkills
         [UnitySkill("gameobject_set_parent", "Set the parent of a GameObject (supports name/instanceId/path)",
             Category = SkillCategory.GameObject, Operation = SkillOperation.Modify,
             Tags = new[] { "parent", "hierarchy", "reparent" },
-            Outputs = new[] { "child", "parent", "newPath" },
+            Outputs = new[] { "child", "parent", "newPath", "parentPath", "position", "localPosition" },
             RequiresInput = new[] { "gameObject" },
             TracksWorkflow = true, MutatesScene = true)]
-        public static object GameObjectSetParent(string childName = null, int childInstanceId = 0, string childPath = null, 
-            string parentName = null, int parentInstanceId = 0, string parentPath = null, string childEntityId = null, string parentEntityId = null)
+        public static object GameObjectSetParent(string childName = null, int childInstanceId = 0, string childPath = null,
+            string parentName = null, int parentInstanceId = 0,
+            [SkillParam("New parent's hierarchy path; omit every parent* locator to move the child to the scene root. The child keeps its world position and rotation.")]
+            string parentPath = null,
+            string childEntityId = null, string parentEntityId = null)
         {
             var (child, childError) = GameObjectFinder.FindOrError(childName, childInstanceId, childPath, entityId: childEntityId);
             if (childError != null) return childError;
 
+            GameObject parentGo = null;
             Transform parent = null;
             if (!string.IsNullOrEmpty(parentEntityId) || !string.IsNullOrEmpty(parentName) || parentInstanceId != 0 || !string.IsNullOrEmpty(parentPath))
             {
-                var (parentGo, parentError) = GameObjectFinder.FindOrError(parentName, parentInstanceId, parentPath, entityId: parentEntityId);
+                var (foundParentGo, parentError) = GameObjectFinder.FindOrError(parentName, parentInstanceId, parentPath, entityId: parentEntityId);
                 if (parentError != null) return parentError;
+                parentGo = foundParentGo;
                 parent = parentGo.transform;
             }
 
+            if (TryBlockedByPrefabStructure(child, parentGo, out var prefabError))
+                return prefabError;
+
             WorkflowManager.SnapshotObject(child.transform);
             Undo.SetTransformParent(child.transform, parent, "Set Parent");
-            return new { 
-                success = true, 
-                child = child.name, 
+
+            if (!ReferenceEquals(child.transform.parent, parent))
+                return ReparentRefusedError(child, parent);
+
+            var t = child.transform;
+            return new {
+                success = true,
+                child = child.name,
                 childEntityId = UnityObjectIdUtility.GetEntityId(child),
-                parent = parent?.name ?? "(root)",
-                parentEntityId = parent != null ? UnityObjectIdUtility.GetEntityId(parent.gameObject) : null,
-                newPath = GameObjectFinder.GetPath(child)
+                parent = t.parent != null ? t.parent.name : "(root)",
+                parentEntityId = t.parent != null ? UnityObjectIdUtility.GetEntityId(t.parent.gameObject) : null,
+                parentPath = t.parent != null ? GameObjectFinder.GetPath(t.parent.gameObject) : null,
+                newPath = GameObjectFinder.GetPath(child),
+                position = new { x = t.position.x, y = t.position.y, z = t.position.z },
+                localPosition = new { x = t.localPosition.x, y = t.localPosition.y, z = t.localPosition.z },
+            };
+        }
+
+        /// <summary>
+        /// Reparenting an existing (prefab-sourced) child of a Prefab instance to a destination
+        /// outside that instance isn't a supported override -- Unity's own SetParent refuses it and
+        /// logs an error (bugs.md B12/read-back matrix). Checking this before calling
+        /// SetTransformParent turns that into a clean structured error instead of an editor LogError
+        /// plus a silent no-op reported as success:true. The instance root itself, and any reparent
+        /// that stays inside the same instance, are unaffected.
+        /// </summary>
+        private static bool TryBlockedByPrefabStructure(GameObject child, GameObject newParentOrNull, out object error)
+        {
+            error = null;
+            if (!PrefabUtility.IsPartOfPrefabInstance(child))
+                return false;
+
+            // A GameObject the user added under a Prefab instance (not part of the Prefab asset
+            // itself) is a supported override, and Unity does let it be reparented, including out
+            // of the instance -- only a member the Prefab asset actually defines is structurally
+            // fixed. IsPartOfPrefabInstance alone can't tell the two apart, so an added object must
+            // be excluded here or this guard would reject a reparent Unity would actually allow.
+            if (PrefabUtility.IsAddedGameObjectOverride(child))
+                return false;
+
+            var childInstanceRoot = PrefabUtility.GetOutermostPrefabInstanceRoot(child);
+            if (childInstanceRoot == child)
+                return false;
+
+            var targetInstanceRoot = newParentOrNull != null ? PrefabUtility.GetOutermostPrefabInstanceRoot(newParentOrNull) : null;
+            if (targetInstanceRoot == childInstanceRoot)
+                return false;
+
+            error = new
+            {
+                error = $"'{child.name}' is a nested part of a Prefab instance and can't be reparented outside it; unpack the instance first.",
+                errorCode = SkillParamUtil.SemanticInvalidCode,
+                retryStrategy = SkillErrorResponse.RetryFixAndRetry,
+                parameter = "parent",
+                target = child.name,
+                suggestedFixes = new object[]
+                {
+                    new { action = "fix_param", skill = "prefab_unpack", reason = "Unpack the Prefab instance, then reparent freely." }
+                }
+            };
+            return true;
+        }
+
+        /// <summary>Defense in depth for any other case Unity refuses a reparent that <see cref="TryBlockedByPrefabStructure"/> didn't predict.</summary>
+        private static object ReparentRefusedError(GameObject child, Transform requestedParent)
+        {
+            var actualParent = child.transform.parent;
+            return new
+            {
+                error = $"'{child.name}' was not reparented: Unity left it under '{(actualParent != null ? actualParent.name : "(root)")}' instead of '{(requestedParent != null ? requestedParent.name : "(root)")}'.",
+                errorCode = SkillParamUtil.SemanticInvalidCode,
+                retryStrategy = SkillErrorResponse.RetryFixAndRetry,
+                parameter = "parent",
+                target = child.name,
             };
         }
 
@@ -692,7 +1030,11 @@ namespace UnitySkills
             RequiresInput = new[] { "gameObject" },
             ReadOnly = true,
             Mode = SkillMode.SemiAuto)]
-        public static object GameObjectGetInfo(string name = null, int instanceId = 0, string path = null, string entityId = null)
+        public static object GameObjectGetInfo(
+            [SkillParam(TargetNameNote)] string name = null,
+            int instanceId = 0,
+            [SkillParam(TargetPathNote)] string path = null,
+            string entityId = null)
         {
             var (go, error) = GameObjectFinder.FindOrError(name, instanceId, path, entityId: entityId);
             if (error != null) return error;
@@ -779,7 +1121,7 @@ namespace UnitySkills
         [UnitySkill("gameobject_set_active", "Enable or disable a GameObject (supports name/instanceId/path)",
             Category = SkillCategory.GameObject, Operation = SkillOperation.Modify,
             Tags = new[] { "active", "enable", "disable", "visibility" },
-            Outputs = new[] { "name", "active" },
+            Outputs = new[] { "name", "active", "activeInHierarchy" },
             RequiresInput = new[] { "gameObject" },
             TracksWorkflow = true, MutatesScene = true)]
         public static object GameObjectSetActive(string name = null, int instanceId = 0, string path = null, bool active = true, string entityId = null)
@@ -791,7 +1133,7 @@ namespace UnitySkills
             Undo.RecordObject(go, "Set Active");
             go.SetActive(active);
 
-            return new { success = true, name = go.name, entityId = UnityObjectIdUtility.GetEntityId(go), active };
+            return new { success = true, name = go.name, entityId = UnityObjectIdUtility.GetEntityId(go), active = go.activeSelf, activeInHierarchy = go.activeInHierarchy };
         }
 
         [UnitySkill("gameobject_set_active_batch", "Enable or disable multiple GameObjects. items: JSON array of {name, active}",
@@ -800,7 +1142,9 @@ namespace UnitySkills
             Outputs = new[] { "totalItems", "successCount", "failCount", "results" },
             RequiresInput = new[] { "items" },
             TracksWorkflow = true, MutatesScene = true)]
-        public static object GameObjectSetActiveBatch(string items)
+        public static object GameObjectSetActiveBatch(
+            [SkillParam("JSON array of {name|path|instanceId|entityId, active? (default true)}.")]
+            string items)
         {
             return BatchExecutor.Execute<BatchSetActiveItem>(items, item =>
             {
@@ -810,8 +1154,8 @@ namespace UnitySkills
                 WorkflowManager.SnapshotObject(go);
                 Undo.RecordObject(go, "Batch Set Active");
                 go.SetActive(item.active);
-                return new { target = go.name, entityId = UnityObjectIdUtility.GetEntityId(go), success = true, active = item.active };
-            }, item => item.name ?? item.path ?? item.entityId);
+                return new { target = go.name, entityId = UnityObjectIdUtility.GetEntityId(go), success = true, active = go.activeSelf, activeInHierarchy = go.activeInHierarchy };
+            }, item => item.name ?? item.path ?? item.entityId, atomic: true);
         }
 
         public class BatchSetActiveItem
@@ -829,7 +1173,9 @@ namespace UnitySkills
             Outputs = new[] { "totalItems", "successCount", "failCount", "results" },
             RequiresInput = new[] { "items" },
             TracksWorkflow = true, MutatesScene = true)]
-        public static object GameObjectSetLayerBatch(string items)
+        public static object GameObjectSetLayerBatch(
+            [SkillParam("JSON array of {name|path|instanceId|entityId, layer (layer name), recursive? (default false)}.")]
+            string items)
         {
             return BatchExecutor.Execute<BatchSetLayerItem>(items, item =>
             {
@@ -844,17 +1190,28 @@ namespace UnitySkills
                 Undo.RecordObject(go, "Batch Set Layer");
                 go.layer = layerId;
 
+                int childrenUpdated = 0;
                 if (item.recursive)
                 {
                     foreach (Transform child in go.GetComponentsInChildren<Transform>(true))
                     {
+                        if (child.gameObject == go) continue;
                         Undo.RecordObject(child.gameObject, "Batch Set Layer Recursive");
                         child.gameObject.layer = layerId;
+                        childrenUpdated++;
                     }
                 }
 
-                return new { target = go.name, entityId = UnityObjectIdUtility.GetEntityId(go), success = true, layer = item.layer };
-            }, item => item.name ?? item.path ?? item.entityId);
+                var result = new Dictionary<string, object> {
+                    ["target"] = go.name,
+                    ["entityId"] = UnityObjectIdUtility.GetEntityId(go),
+                    ["success"] = true,
+                    ["layer"] = LayerMask.LayerToName(go.layer),
+                };
+                if (item.recursive)
+                    result["childrenUpdated"] = childrenUpdated;
+                return result;
+            }, item => item.name ?? item.path ?? item.entityId, atomic: true);
         }
 
         private class BatchSetLayerItem
@@ -873,7 +1230,9 @@ namespace UnitySkills
             Outputs = new[] { "totalItems", "successCount", "failCount", "results" },
             RequiresInput = new[] { "items" },
             TracksWorkflow = true, MutatesScene = true)]
-        public static object GameObjectSetTagBatch(string items)
+        public static object GameObjectSetTagBatch(
+            [SkillParam("JSON array of {name|path|instanceId|entityId, tag}; the tag must already exist in the Tag Manager.")]
+            string items)
         {
             return BatchExecutor.Execute<BatchSetTagItem>(items, item =>
             {
@@ -884,27 +1243,14 @@ namespace UnitySkills
                 // is a no-op, the object keeps its original tag) without throwing, so an entry with a
                 // misspelled tag must be explicitly rejected rather than reported as success:true.
                 string target = item.name ?? item.path ?? item.entityId;
-                if (!IsTagDefined(item.tag))
+                if (!SkillsCommon.IsTagDefined(item.tag))
                     return SkillParamUtil.InvalidValueError(item.tag, "tag", InternalEditorUtility.tags, target);
 
                 WorkflowManager.SnapshotObject(go);
                 Undo.RecordObject(go, "Batch Set Tag");
                 go.tag = item.tag;
-                return new { target = go.name, entityId = UnityObjectIdUtility.GetEntityId(go), success = true, tag = item.tag };
-            }, item => item.name ?? item.path ?? item.entityId);
-        }
-
-        /// <summary>
-        /// Determines whether <paramref name="tag"/> is already registered in TagManager. An unregistered
-        /// tag makes both GameObject.tag's setter and GameObject.FindGameObjectsWithTag fail — the former
-        /// silently (no throw, no effect), the latter by throwing UnityException — so any tag write
-        /// or tag-filtered read must pass this check first, rather than discovering the problem on impact.
-        /// </summary>
-        private static bool IsTagDefined(string tag)
-        {
-            if (string.IsNullOrEmpty(tag))
-                return false;
-            return InternalEditorUtility.tags.Contains(tag);
+                return new { target = go.name, entityId = UnityObjectIdUtility.GetEntityId(go), success = true, tag = go.tag };
+            }, item => item.name ?? item.path ?? item.entityId, atomic: true);
         }
 
         private class BatchSetTagItem
@@ -922,32 +1268,47 @@ namespace UnitySkills
             Outputs = new[] { "totalItems", "successCount", "failCount", "results" },
             RequiresInput = new[] { "items" },
             TracksWorkflow = true, MutatesScene = true)]
-        public static object GameObjectSetParentBatch(string items)
+        public static object GameObjectSetParentBatch(
+            [SkillParam("JSON array of {childName|childPath|childInstanceId|childEntityId, parentName|parentPath|parentInstanceId|parentEntityId?}; no parent locator = scene root.")]
+            string items)
         {
             return BatchExecutor.Execute<BatchSetParentItem>(items, item =>
             {
                 var (child, childError) = GameObjectFinder.FindOrError(item.childName, item.childInstanceId, item.childPath, entityId: item.childEntityId);
                 if (childError != null) return new { error = "Child object not found", target = item.childName ?? item.childPath ?? item.childEntityId };
 
+                GameObject parentGo = null;
                 Transform parent = null;
                 if (!string.IsNullOrEmpty(item.parentEntityId) || !string.IsNullOrEmpty(item.parentName) || item.parentInstanceId != 0 || !string.IsNullOrEmpty(item.parentPath))
                 {
-                    var (parentGo, parentError) = GameObjectFinder.FindOrError(item.parentName, item.parentInstanceId, item.parentPath, entityId: item.parentEntityId);
+                    var (foundParentGo, parentError) = GameObjectFinder.FindOrError(item.parentName, item.parentInstanceId, item.parentPath, entityId: item.parentEntityId);
                     if (parentError != null)
-                        return new { error = $"Parent not found: {item.parentName ?? item.parentPath ?? item.parentEntityId}" };
+                        return new { error = $"Parent not found: {item.parentName ?? item.parentPath ?? item.parentEntityId}", target = item.childName ?? item.childPath ?? item.childEntityId };
+                    parentGo = foundParentGo;
                     parent = parentGo.transform;
                 }
 
+                if (TryBlockedByPrefabStructure(child, parentGo, out var prefabError))
+                    return prefabError;
+
                 WorkflowManager.SnapshotObject(child.transform);
                 Undo.SetTransformParent(child.transform, parent, "Batch Set Parent");
+
+                if (!ReferenceEquals(child.transform.parent, parent))
+                    return ReparentRefusedError(child, parent);
+
+                var t = child.transform;
                 return new
                 {
                     target = child.name,
                     entityId = UnityObjectIdUtility.GetEntityId(child),
                     success = true,
-                    parent = parent?.name ?? "(root)"
+                    parent = t.parent != null ? t.parent.name : "(root)",
+                    parentPath = t.parent != null ? GameObjectFinder.GetPath(t.parent.gameObject) : null,
+                    position = new { x = t.position.x, y = t.position.y, z = t.position.z },
+                    localPosition = new { x = t.localPosition.x, y = t.localPosition.y, z = t.localPosition.z },
                 };
-            }, item => item.childName ?? item.childPath ?? item.childEntityId);
+            }, item => item.childName ?? item.childPath ?? item.childEntityId, atomic: true);
         }
 
         private class BatchSetParentItem
